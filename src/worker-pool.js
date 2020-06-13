@@ -11,7 +11,11 @@ const debug_exec = debug.extend('exec');
 const workerMain = `${__dirname}/worker-main.js`;
 const defaultMax = Math.max(1, Math.min(os.cpus().length - 1, 3));
 
-/** */
+/**
+ * Provides a pool of child processes and the ability to instruct those
+ * processes to require modules and invoke their exported functions.
+ * @extends EventEmitter
+ */
 class WorkerPool extends EventEmitter {
   #timeout;
   #strategy;
@@ -22,6 +26,18 @@ class WorkerPool extends EventEmitter {
 
   #workers = [];
 
+  /**
+   * @param {Object} options={} - Optional parameters
+   * @param {number} options.cwd - The current working directory for child processes
+   * @param {number} options.args - Arguments to pass to child processes
+   * @param {number} options.env - Environmental variables to pass to child processes
+   * @param {number} options.min=0 - The minimum number of child processes in the pool
+   * @param {number} options.max=3 - The maximum number of child processes in the pool
+   * @param {number} options.idle=30000 - Milliseconds before an idle process will be removed from the pool
+   * @param {number} options.timeout=30000 - Milliseconds before a child process will receive SIGKILL after receiving SIGTERM if it has not already exited
+   * @param {'fewest'|'fill'|'round-robin'|'random'} options.strategy='fewest' - The strategy to use when routing requests to child processes
+   * @param {number} options.full=10 - The number of requests per child process used by the 'fill' strategy
+   */
   constructor({
     cwd,
     args,
@@ -72,6 +88,9 @@ class WorkerPool extends EventEmitter {
     this.emit('start');
   }
 
+  /**
+   * Stops the worker pool, gracefully shutting down each child process
+   */
   stop() {
     debug('Stopping worker pool');
 
@@ -88,12 +107,25 @@ class WorkerPool extends EventEmitter {
       });
   }
 
+  /**
+   * Sends a request to a child process in the pool asking it to require a module and invoke a function with the provided arguments
+   * @param {string} modulePath - The module path for the child process to require()
+   * @param {string} functionName - The name of a function expored by the required module
+   * @param {...any} args - Arguments to pass when invoking function
+   * @returns {Promise} The result of the function invocation
+   */
   async exec(modulePath, functionName, ...args) {
     const resolvedModulePath = this._resolve(modulePath);
 
     return this._exec(resolvedModulePath, functionName, args);
   }
 
+  /**
+   * Creates a proxy function that will invoke WorkerPool#exec() with the provided module path and function name
+   * @param {string} modulePath - The module path for the child process to require()
+   * @param {string} functionName - The name of a function expored by the required module
+   * @returns {Function} A function that returns a Promise and invokes the child process function with the provided args
+   */
   proxy(modulePath, functionName) {
     const resolvedModulePath = this._resolve(modulePath);
 
@@ -195,7 +227,6 @@ class WorkerPool extends EventEmitter {
   _fewestStrategy() {
     const workers = this.#workers;
 
-    // Use the queue with the shortest queue
     let worker = workers[0];
 
     for (let i = 1, len = workers.length; i < len; ++i) {
@@ -212,7 +243,7 @@ class WorkerPool extends EventEmitter {
   /**
    * Return the first worker that is not full, or if they are all full, the
    * worker with the fewest number of queued requests. This does not prevent
-   * workers from overfilling, it will fill each worker before moving on to
+   * workers from overfilling. It will fill each worker before moving on to
    * the next, and will fall back to the "fewest" strategy when all workers
    * are full.
    * @private
@@ -222,7 +253,6 @@ class WorkerPool extends EventEmitter {
     const workers = this.#workers;
     const full = this.#full;
 
-    // Use the queue with the most tasks, but don't overfill
     worker = workers[0];
     const fewest = worker;
 
@@ -252,7 +282,6 @@ class WorkerPool extends EventEmitter {
   _roundRobinStrategy() {
     const workers = this.#workers;
 
-    // Rotate through queues
     let round = this.#round++;
     if (round >= workers.length) {
       round = this.#round = 0;
