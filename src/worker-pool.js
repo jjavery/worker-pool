@@ -17,14 +17,14 @@ const defaultMax = Math.max(1, Math.min(os.cpus().length - 1, 3));
  * @extends EventEmitter
  */
 class WorkerPool extends EventEmitter {
-  #timeout;
-  #strategy;
-  #full;
-  #round = 0;
+  _timeout;
+  _strategy;
+  _full;
+  _round = 0;
 
-  #genericPool;
+  _genericPool;
 
-  #workers = [];
+  _workers = [];
 
   /**
    * @param {Object} options={} - Optional parameters
@@ -55,9 +55,9 @@ class WorkerPool extends EventEmitter {
       max = min;
     }
 
-    this.#timeout = timeout;
-    this.#strategy = strategy;
-    this.#full = full;
+    this._timeout = timeout;
+    this._strategy = strategy;
+    this._full = full;
 
     const factory = {
       create: () => {
@@ -75,12 +75,12 @@ class WorkerPool extends EventEmitter {
       evictionRunIntervalMillis: 1000
     };
 
-    this.#genericPool = genericPool.createPool(factory, options);
+    this._genericPool = genericPool.createPool(factory, options);
 
     for (let i = 0; i < max; ++i) {
       const worker = new Worker(this);
 
-      this.#workers.push(worker);
+      this._workers.push(worker);
     }
 
     debug('Worker pool started');
@@ -94,9 +94,9 @@ class WorkerPool extends EventEmitter {
   stop() {
     debug('Stopping worker pool');
 
-    this.#genericPool
+    this._genericPool
       .drain()
-      .then(() => this.#genericPool.clear())
+      .then(() => this._genericPool.clear())
       .catch((err) => {
         this.emit('error', err);
       })
@@ -166,7 +166,7 @@ class WorkerPool extends EventEmitter {
   }
 
   _getWorker() {
-    switch (this.#strategy) {
+    switch (this._strategy) {
       case 'fewest':
         return this._fewestStrategy();
       case 'fill':
@@ -176,7 +176,7 @@ class WorkerPool extends EventEmitter {
       case 'random':
         return this._randomStrategy();
       default:
-        throw new Error(`Unknown strategy "${this.#strategy}"`);
+        throw new Error(`Unknown strategy "${this._strategy}"`);
     }
   }
 
@@ -196,7 +196,7 @@ class WorkerPool extends EventEmitter {
     debug('Destroying child process [%d]', childProcess.pid);
 
     // Set up a timer to send SIGKILL to the child process after the timeout
-    const timer = setTimeout(() => childProcess.kill('SIGKILL'), this.#timeout);
+    const timer = setTimeout(() => childProcess.kill('SIGKILL'), this._timeout);
 
     // Don't let this timer keep the (parent) process alive
     timer.unref();
@@ -213,11 +213,11 @@ class WorkerPool extends EventEmitter {
   }
 
   async _acquireChildProcess() {
-    return this.#genericPool.acquire();
+    return this._genericPool.acquire();
   }
 
   async _releaseChildProcess(childProcess) {
-    return this.#genericPool.release(childProcess);
+      return this._genericPool.release(childProcess);
   }
 
   /**
@@ -225,7 +225,7 @@ class WorkerPool extends EventEmitter {
    * @private
    */
   _fewestStrategy() {
-    const workers = this.#workers;
+    const workers = this._workers;
 
     let worker = workers[0];
 
@@ -250,8 +250,8 @@ class WorkerPool extends EventEmitter {
    */
   _fillStrategy() {
     let worker = null;
-    const workers = this.#workers;
-    const full = this.#full;
+    const workers = this._workers;
+    const full = this._full;
 
     worker = workers[0];
     const fewest = worker;
@@ -280,11 +280,11 @@ class WorkerPool extends EventEmitter {
    * @private
    */
   _roundRobinStrategy() {
-    const workers = this.#workers;
+    const workers = this._workers;
 
-    let round = this.#round++;
+    let round = this._round++;
     if (round >= workers.length) {
-      round = this.#round = 0;
+      round = this._round = 0;
     }
 
     return workers[round];
@@ -295,7 +295,7 @@ class WorkerPool extends EventEmitter {
    * @private
    */
   _randomStrategy() {
-    const workers = this.#workers;
+    const workers = this._workers;
 
     const random = Math.floor(Math.random() * workers.length);
 
