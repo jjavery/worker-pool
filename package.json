@@ -1,0 +1,46 @@
+{
+  "name": "@jjavery/worker-pool",
+  "version": "0.1.0",
+  "description": "A worker pool for Node.js applications",
+  "keywords": [
+    "worker pool",
+    "process pool",
+    "child_process",
+    "workerpool"
+  ],
+  "homepage": "https://github.com/jjavery/worker-pool#readme",
+  "bugs": "https://github.com/jjavery/worker-pool/issues",
+  "license": "MIT",
+  "author": "James P. Javery <james.javery@gmail.com> (https://github.com/jjavery)",
+  "files": [
+    "src"
+  ],
+  "repository": "jjavery/worker-pool",
+  "main": "src/worker-pool.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "mocha",
+    "docs": "jsdoc2md --template README.template.hbs.md --files src/*.js > README.md"
+  },
+  "devDependencies": {
+    "chai": "^4.2.0",
+    "jsdoc-to-markdown": "^6.0.1",
+    "mocha": "^8.0.1"
+  },
+  "dependencies": {
+    "debug": "^4.1.1",
+    "generic-pool": "^3.7.1",
+    "serialize-error": "^7.0.1"
+  },
+  "engines": {
+    "node": ">=12.0.0"
+  },
+  "mocha": {
+    "recursive": true,
+    "slow": 500,
+    "timeout": 999999,
+    "require": "test/test-env.js"
+  }
+}
