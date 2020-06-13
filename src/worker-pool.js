@@ -44,7 +44,7 @@ class WorkerPool extends EventEmitter {
     env,
     min = 0,
     max = defaultMax,
-    idle = 1000,
+    idle = 30000,
     timeout = 30000,
     strategy = 'fewest',
     full = 10
@@ -86,6 +86,15 @@ class WorkerPool extends EventEmitter {
     debug('Worker pool started');
 
     this.emit('start');
+  }
+
+  info() {
+    return {
+      workers: this._workers.map(({ queued, _childProcess }) => ({
+        pid: _childProcess ? _childProcess.pid : null,
+        queued
+      }))
+    };
   }
 
   /**
@@ -146,19 +155,25 @@ class WorkerPool extends EventEmitter {
 
     await worker.acquire();
 
-    const reply = await worker.request({
-      modulePath: resolvedModulePath,
-      functionName,
-      args
-    });
+    let reply;
 
-    worker.release();
+    try {
+      reply = await worker.request({
+        modulePath: resolvedModulePath,
+        functionName,
+        args
+      });
+    } catch (err) {
+      throw err;
+    } finally {
+      worker.release();
+    }
 
     return reply;
   }
 
   _resolve(modulePath) {
-    if (path.parse(modulePath).dir !== '') {
+    if (/^(\/|.\/|..\/)/.test(modulePath)) {
       const dirname = path.dirname(module.parent.filename);
       modulePath = path.resolve(dirname, modulePath);
     }
@@ -183,7 +198,11 @@ class WorkerPool extends EventEmitter {
   _createChildProcess(modulePath, args, cwd, env) {
     debug('Creating child process from "%s"', modulePath);
 
-    const childProcess = child_process.fork(modulePath, args, { cwd, env });
+    const childProcess = child_process.fork(modulePath, args, {
+      serialization: 'advanced',
+      cwd,
+      env
+    });
 
     debug('Created child process [%d]', childProcess.pid);
 
@@ -193,6 +212,14 @@ class WorkerPool extends EventEmitter {
   }
 
   _destroyChildProcess(childProcess) {
+    if (childProcess.exitCode !== null) {
+      debug(
+        "Won't destroy child process [%d] because it has already exited",
+        childProcess.pid
+      );
+      return;
+    }
+
     debug('Destroying child process [%d]', childProcess.pid);
 
     // Set up a timer to send SIGKILL to the child process after the timeout
@@ -217,7 +244,11 @@ class WorkerPool extends EventEmitter {
   }
 
   async _releaseChildProcess(childProcess) {
+    if (childProcess.exitCode !== null) {
+      return this._genericPool.destroy(childProcess);
+    } else {
       return this._genericPool.release(childProcess);
+    }
   }
 
   /**

@@ -35,14 +35,16 @@ class Worker {
     this._acquireChildProcess = null;
 
     childProcess.on('message', (message) => this._response(message));
+    childProcess.once('exit', () => this._cleanup());
   }
 
   async release() {
     const queued = (this._queued = Math.max(this._queued - 1, 0));
 
     if (queued === 0) {
-      await this.#workerPool._releaseChildProcess(this.#childProcess);
+      const childProcess = this._childProcess;
       this._childProcess = null;
+      await this._workerPool._releaseChildProcess(childProcess);
     }
   }
 
@@ -76,6 +78,22 @@ class Worker {
       reject(deserializeError(err));
     } else {
       resolve(result);
+    }
+  }
+
+  _cleanup() {
+    const requests = this._requests;
+    const ids = Object.keys(requests);
+
+    if (ids.length > 0) {
+      debug('Child process [%d] exited unexpectedly', this._childProcess.pid);
+    }
+
+    for (let id of ids) {
+      const { reject } = requests[id];
+      delete requests[id];
+
+      reject(new Error('Child process exited unexpectedly'));
     }
   }
 
