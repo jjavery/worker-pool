@@ -22,9 +22,10 @@
   },
   "scripts": {
     "test": "mocha",
-    "docs": "jsdoc2md --template README.template.hbs.md --files src/*.js > README.md"
+    "docs": "jsdoc2md --template README.template.hbs.md --plugin @jjavery/dmd-jjavery --files src/*.js > README.md"
   },
   "devDependencies": {
+    "@jjavery/dmd-jjavery": "^0.1.0",
     "chai": "^4.2.0",
     "jsdoc-to-markdown": "^6.0.1",
     "mocha": "^8.0.1"

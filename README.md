@@ -4,10 +4,7 @@ A worker pool for Node.js applications
 
 # API Reference
 
-<a name="WorkerPool"></a>
-
 ## WorkerPool
-**Kind**: global class  
 
 * * *
 
