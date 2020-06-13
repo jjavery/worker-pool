@@ -2,48 +2,49 @@ const debug = require('debug')('worker-pool:worker');
 const { deserializeError } = require('serialize-error');
 
 class Worker {
-  #workerPool;
-  #queued = 0;
-  #childProcess = null;
-  #acquireChildProcess = null;
-  #requests = {};
-  #id = 0;
+  _workerPool;
+  _queued = 0;
+  _childProcess = null;
+  _acquireChildProcess = null;
+  _requests = {};
+  _id = 0;
 
   get queued() {
-    return this.#queued;
+    return this._queued;
   }
 
   constructor(workerPool) {
-    this.#workerPool = workerPool;
+    this._workerPool = workerPool;
   }
 
   async acquire() {
-    this.#queued++;
+    this._queued++;
 
-    let childProcess = this.#childProcess;
+    let childProcess = this._childProcess;
 
     if (childProcess != null) {
       return;
-    } else if (this.#acquireChildProcess != null) {
-      return this.#acquireChildProcess;
+    } else if (this._acquireChildProcess != null) {
+      return this._acquireChildProcess;
     }
 
-    const acquireChildProcess = (this.#acquireChildProcess = this.#workerPool._acquireChildProcess());
+    const acquireChildProcess = (this._acquireChildProcess = this._workerPool._acquireChildProcess());
 
-    childProcess = await acquireChildProcess;
+    childProcess = this._childProcess = await acquireChildProcess;
 
-    this.#acquireChildProcess = null;
-    this.#childProcess = childProcess;
+    this._acquireChildProcess = null;
 
     childProcess.on('message', (message) => this._response(message));
+    childProcess.once('exit', () => this._cleanup());
   }
 
   async release() {
-    const queued = --this.#queued;
+    const queued = (this._queued = Math.max(this._queued - 1, 0));
 
     if (queued === 0) {
-      await this.#workerPool._releaseChildProcess(this.#childProcess);
-      this.#childProcess = null;
+      const childProcess = this._childProcess;
+      this._childProcess = null;
+      await this._workerPool._releaseChildProcess(childProcess);
     }
   }
 
@@ -52,7 +53,7 @@ class Worker {
 
     const messageToSend = Object.assign({}, message, { id });
 
-    const childProcess = this.#childProcess;
+    const childProcess = this._childProcess;
 
     debug('Sending message to child process [%d]:', childProcess.pid);
     debug('%j', messageToSend);
@@ -60,17 +61,17 @@ class Worker {
     childProcess.send(messageToSend, sendHandle);
 
     return new Promise((resolve, reject) => {
-      this.#requests[id] = { resolve, reject, childProcess };
+      this._requests[id] = { resolve, reject };
     });
   }
 
   _response(message) {
     const { id, err, result } = message;
 
-    const { resolve, reject, childProcess } = this.#requests[id];
-    delete this.#requests[id];
+    const { resolve, reject } = this._requests[id];
+    delete this._requests[id];
 
-    debug('Received message from child process [%d]:', childProcess.pid);
+    debug('Received message from child process [%d]:', this._childProcess.pid);
     debug('%j', message);
 
     if (err != null) {
@@ -80,11 +81,27 @@ class Worker {
     }
   }
 
+  _cleanup() {
+    const requests = this._requests;
+    const ids = Object.keys(requests);
+
+    if (ids.length > 0) {
+      debug('Child process [%d] exited unexpectedly', this._childProcess.pid);
+    }
+
+    for (let id of ids) {
+      const { reject } = requests[id];
+      delete requests[id];
+
+      reject(new Error('Child process exited unexpectedly'));
+    }
+  }
+
   _getNextID() {
-    let id = this.#id++;
+    let id = this._id++;
 
     if (id >= Number.MAX_SAFE_INTEGER) {
-      id = this.#id = 0;
+      id = this._id = 0;
     }
 
     return id;

@@ -11,24 +11,40 @@ const debug_exec = debug.extend('exec');
 const workerMain = `${__dirname}/worker-main.js`;
 const defaultMax = Math.max(1, Math.min(os.cpus().length - 1, 3));
 
-/** */
+/**
+ * Provides a pool of child processes and the ability to instruct those
+ * processes to require modules and invoke their exported functions.
+ * @extends EventEmitter
+ */
 class WorkerPool extends EventEmitter {
-  #timeout;
-  #strategy;
-  #full;
-  #round = 0;
+  _timeout;
+  _strategy;
+  _full;
+  _round = 0;
 
-  #genericPool;
+  _genericPool;
 
-  #workers = [];
+  _workers = [];
 
+  /**
+   * @param {Object} options={} - Optional parameters
+   * @param {number} options.cwd - The current working directory for child processes
+   * @param {number} options.args - Arguments to pass to child processes
+   * @param {number} options.env - Environmental variables to pass to child processes
+   * @param {number} options.min=0 - The minimum number of child processes in the pool
+   * @param {number} options.max=3 - The maximum number of child processes in the pool
+   * @param {number} options.idle=30000 - Milliseconds before an idle process will be removed from the pool
+   * @param {number} options.timeout=30000 - Milliseconds before a child process will receive SIGKILL after receiving SIGTERM if it has not already exited
+   * @param {'fewest'|'fill'|'round-robin'|'random'} options.strategy='fewest' - The strategy to use when routing requests to child processes
+   * @param {number} options.full=10 - The number of requests per child process used by the 'fill' strategy
+   */
   constructor({
     cwd,
     args,
     env,
     min = 0,
     max = defaultMax,
-    idle = 1000,
+    idle = 30000,
     timeout = 30000,
     strategy = 'fewest',
     full = 10
@@ -39,9 +55,9 @@ class WorkerPool extends EventEmitter {
       max = min;
     }
 
-    this.#timeout = timeout;
-    this.#strategy = strategy;
-    this.#full = full;
+    this._timeout = timeout;
+    this._strategy = strategy;
+    this._full = full;
 
     const factory = {
       create: () => {
@@ -59,12 +75,12 @@ class WorkerPool extends EventEmitter {
       evictionRunIntervalMillis: 1000
     };
 
-    this.#genericPool = genericPool.createPool(factory, options);
+    this._genericPool = genericPool.createPool(factory, options);
 
     for (let i = 0; i < max; ++i) {
       const worker = new Worker(this);
 
-      this.#workers.push(worker);
+      this._workers.push(worker);
     }
 
     debug('Worker pool started');
@@ -72,12 +88,24 @@ class WorkerPool extends EventEmitter {
     this.emit('start');
   }
 
+  info() {
+    return {
+      workers: this._workers.map(({ queued, _childProcess }) => ({
+        pid: _childProcess ? _childProcess.pid : null,
+        queued
+      }))
+    };
+  }
+
+  /**
+   * Stops the worker pool, gracefully shutting down each child process
+   */
   stop() {
     debug('Stopping worker pool');
 
-    this.#genericPool
+    this._genericPool
       .drain()
-      .then(() => this.#genericPool.clear())
+      .then(() => this._genericPool.clear())
       .catch((err) => {
         this.emit('error', err);
       })
@@ -88,12 +116,25 @@ class WorkerPool extends EventEmitter {
       });
   }
 
+  /**
+   * Sends a request to a child process in the pool asking it to require a module and invoke a function with the provided arguments
+   * @param {string} modulePath - The module path for the child process to require()
+   * @param {string} functionName - The name of a function expored by the required module
+   * @param {...any} args - Arguments to pass when invoking function
+   * @returns {Promise} The result of the function invocation
+   */
   async exec(modulePath, functionName, ...args) {
     const resolvedModulePath = this._resolve(modulePath);
 
     return this._exec(resolvedModulePath, functionName, args);
   }
 
+  /**
+   * Creates a proxy function that will invoke WorkerPool#exec() with the provided module path and function name
+   * @param {string} modulePath - The module path for the child process to require()
+   * @param {string} functionName - The name of a function expored by the required module
+   * @returns {Function} A function that returns a Promise and invokes the child process function with the provided args
+   */
   proxy(modulePath, functionName) {
     const resolvedModulePath = this._resolve(modulePath);
 
@@ -114,19 +155,25 @@ class WorkerPool extends EventEmitter {
 
     await worker.acquire();
 
-    const reply = await worker.request({
-      modulePath: resolvedModulePath,
-      functionName,
-      args
-    });
+    let reply;
 
-    worker.release();
+    try {
+      reply = await worker.request({
+        modulePath: resolvedModulePath,
+        functionName,
+        args
+      });
+    } catch (err) {
+      throw err;
+    } finally {
+      worker.release();
+    }
 
     return reply;
   }
 
   _resolve(modulePath) {
-    if (path.parse(modulePath).dir !== '') {
+    if (/^(\/|.\/|..\/)/.test(modulePath)) {
       const dirname = path.dirname(module.parent.filename);
       modulePath = path.resolve(dirname, modulePath);
     }
@@ -134,7 +181,7 @@ class WorkerPool extends EventEmitter {
   }
 
   _getWorker() {
-    switch (this.#strategy) {
+    switch (this._strategy) {
       case 'fewest':
         return this._fewestStrategy();
       case 'fill':
@@ -144,14 +191,18 @@ class WorkerPool extends EventEmitter {
       case 'random':
         return this._randomStrategy();
       default:
-        throw new Error(`Unknown strategy "${this.#strategy}"`);
+        throw new Error(`Unknown strategy "${this._strategy}"`);
     }
   }
 
   _createChildProcess(modulePath, args, cwd, env) {
     debug('Creating child process from "%s"', modulePath);
 
-    const childProcess = child_process.fork(modulePath, args, { cwd, env });
+    const childProcess = child_process.fork(modulePath, args, {
+      serialization: 'advanced',
+      cwd,
+      env
+    });
 
     debug('Created child process [%d]', childProcess.pid);
 
@@ -161,10 +212,18 @@ class WorkerPool extends EventEmitter {
   }
 
   _destroyChildProcess(childProcess) {
+    if (childProcess.exitCode !== null) {
+      debug(
+        "Won't destroy child process [%d] because it has already exited",
+        childProcess.pid
+      );
+      return;
+    }
+
     debug('Destroying child process [%d]', childProcess.pid);
 
     // Set up a timer to send SIGKILL to the child process after the timeout
-    const timer = setTimeout(() => childProcess.kill('SIGKILL'), this.#timeout);
+    const timer = setTimeout(() => childProcess.kill('SIGKILL'), this._timeout);
 
     // Don't let this timer keep the (parent) process alive
     timer.unref();
@@ -181,11 +240,15 @@ class WorkerPool extends EventEmitter {
   }
 
   async _acquireChildProcess() {
-    return this.#genericPool.acquire();
+    return this._genericPool.acquire();
   }
 
   async _releaseChildProcess(childProcess) {
-    return this.#genericPool.release(childProcess);
+    if (childProcess.exitCode !== null) {
+      return this._genericPool.destroy(childProcess);
+    } else {
+      return this._genericPool.release(childProcess);
+    }
   }
 
   /**
@@ -193,9 +256,8 @@ class WorkerPool extends EventEmitter {
    * @private
    */
   _fewestStrategy() {
-    const workers = this.#workers;
+    const workers = this._workers;
 
-    // Use the queue with the shortest queue
     let worker = workers[0];
 
     for (let i = 1, len = workers.length; i < len; ++i) {
@@ -212,17 +274,16 @@ class WorkerPool extends EventEmitter {
   /**
    * Return the first worker that is not full, or if they are all full, the
    * worker with the fewest number of queued requests. This does not prevent
-   * workers from overfilling, it will fill each worker before moving on to
+   * workers from overfilling. It will fill each worker before moving on to
    * the next, and will fall back to the "fewest" strategy when all workers
    * are full.
    * @private
    */
   _fillStrategy() {
     let worker = null;
-    const workers = this.#workers;
-    const full = this.#full;
+    const workers = this._workers;
+    const full = this._full;
 
-    // Use the queue with the most tasks, but don't overfill
     worker = workers[0];
     const fewest = worker;
 
@@ -250,12 +311,11 @@ class WorkerPool extends EventEmitter {
    * @private
    */
   _roundRobinStrategy() {
-    const workers = this.#workers;
+    const workers = this._workers;
 
-    // Rotate through queues
-    let round = this.#round++;
+    let round = this._round++;
     if (round >= workers.length) {
-      round = this.#round = 0;
+      round = this._round = 0;
     }
 
     return workers[round];
@@ -266,7 +326,7 @@ class WorkerPool extends EventEmitter {
    * @private
    */
   _randomStrategy() {
-    const workers = this.#workers;
+    const workers = this._workers;
 
     const random = Math.floor(Math.random() * workers.length);
 

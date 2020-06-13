@@ -3,8 +3,13 @@ async function test(test, ms) {
   return test;
 }
 
+function exit() {
+  process.exit();
+}
+
 module.exports = {
-  test
+  test,
+  exit
 };
 
 async function wait(ms) {
