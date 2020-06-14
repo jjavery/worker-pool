@@ -8,10 +8,20 @@ setInterval(() => {}, 2 ** 31 - 1);
 // Handle requests from the worker pool
 process.on('message', handleRequest);
 
+// Inform the worker pool that this worker is ready
+process.send('ready');
+
 function handleRequest(message) {
   const { id, modulePath, functionName, args } = message;
 
-  const module = require(modulePath);
+  let module;
+
+  try {
+    module = require(modulePath);
+  } catch (err) {
+    handleError(id, err);
+    return;
+  }
 
   const fn = module[functionName];
 

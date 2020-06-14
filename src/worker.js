@@ -1,11 +1,14 @@
 const debug = require('debug')('worker-pool:worker');
 const { deserializeError } = require('serialize-error');
+const { exit } = require('../test/test-worker');
 
 class Worker {
-  _workerPool;
+  _genericPool;
   _queued = 0;
   _childProcess = null;
-  _acquireChildProcess = null;
+  _acquiringChildProcess = null;
+  _messageListener = null;
+  _exitListener = null;
   _requests = {};
   _id = 0;
 
@@ -13,29 +16,47 @@ class Worker {
     return this._queued;
   }
 
-  constructor(workerPool) {
-    this._workerPool = workerPool;
+  constructor(genericPool) {
+    this._genericPool = genericPool;
   }
 
   async acquire() {
     this._queued++;
 
     let childProcess = this._childProcess;
+    const acquiringChildProcess = this._acquiringChildProcess;
 
+    // If this worker already has a child process then there's nothing to do
     if (childProcess != null) {
       return;
-    } else if (this._acquireChildProcess != null) {
-      return this._acquireChildProcess;
+    }
+    // If this worker is in the process of acquring a child process, return the
+    // promise that will resolve when a child process is acquired
+    else if (acquiringChildProcess != null) {
+      return acquiringChildProcess;
     }
 
-    const acquireChildProcess = (this._acquireChildProcess = this._workerPool._acquireChildProcess());
+    // No child process and no promise so create the promise and acquire
+    // a child process
+    return (this._acquiringChildProcess = new Promise((resolve, reject) => {
+      this._acquireChildProcess()
+        .then((childProcess) => {
+          this._childProcess = childProcess;
+          this._acquiringChildProcess = null;
 
-    childProcess = this._childProcess = await acquireChildProcess;
+          const messageListener = (this._messageListener = (message) =>
+            this._response(message));
+          const exitListener = (this._exitListener = () => this._cleanup());
 
-    this._acquireChildProcess = null;
+          childProcess.on('message', messageListener);
+          childProcess.once('exit', exitListener);
 
-    childProcess.on('message', (message) => this._response(message));
-    childProcess.once('exit', () => this._cleanup());
+          resolve();
+        })
+        .catch((err) => {
+          reject(err);
+        });
+    }));
   }
 
   async release() {
@@ -44,7 +65,21 @@ class Worker {
     if (queued === 0) {
       const childProcess = this._childProcess;
       this._childProcess = null;
-      await this._workerPool._releaseChildProcess(childProcess);
+
+      const messageListener = this._messageListener;
+      const exitListener = this._exitListener;
+
+      if (messageListener) {
+        childProcess.removeListener('message', messageListener);
+      }
+      if (exitListener) {
+        childProcess.removeListener('exit', exitListener);
+      }
+
+      this._messageListener = null;
+      this._exitListener = null;
+
+      await this._releaseChildProcess(childProcess);
     }
   }
 
@@ -78,6 +113,18 @@ class Worker {
       reject(deserializeError(err));
     } else {
       resolve(result);
+    }
+  }
+
+  async _acquireChildProcess() {
+    return this._genericPool.acquire();
+  }
+
+  async _releaseChildProcess(childProcess) {
+    if (childProcess.exitCode !== null) {
+      return this._genericPool.destroy(childProcess);
+    } else {
+      return this._genericPool.release(childProcess);
     }
   }
 
