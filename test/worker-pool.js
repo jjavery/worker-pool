@@ -24,7 +24,7 @@ describe('WorkerPool', async () => {
     assert.equal(result, 'test');
   });
 
-  it.only('properly handles child processes that exit unexpectedly', async () => {
+  it('properly handles child processes that exit unexpectedly', async () => {
     const workerPool = new WorkerPool();
 
     const exit = workerPool.proxy('./test-worker', 'exit');
@@ -44,4 +44,21 @@ describe('WorkerPool', async () => {
     assert.equal(result, 'test');
   });
 
+  it('recycles a worker pool', async () => {
+    const workerPool = new WorkerPool();
+
+    const test = workerPool.proxy('./test-worker', 'test');
+
+    test('test', 100)
+      .then(() => {})
+      .catch((err) => {});
+
+    workerPool.recycle();
+
+    const result = await test('test', 100);
+
+    workerPool.stop();
+
+    assert.equal(result, 'test');
+  });
 });
