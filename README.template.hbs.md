@@ -16,7 +16,7 @@ $ npm install @jjavery/worker-pool
 
 ```javascript
 // Get a reference to the WorkerPool class
-const WorkerPool = require('../');
+const WorkerPool = require('@jjavery/workerpool');
 
 // Create an instance of a WorkerPool. The pool will start with 1 process and
 // expand to 5 as needed. The 'fill' strategy will queue up to 10 requests in
