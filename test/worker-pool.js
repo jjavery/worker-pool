@@ -1,8 +1,8 @@
 const { assert } = require('chai');
 const WorkerPool = require('../src/worker-pool');
 
-describe('WorkerPool', async () => {
-  it('execues a function exported by a worker module', async () => {
+describe('WorkerPool', function () {
+  it('execues a function exported by a worker module', async function () {
     const workerPool = new WorkerPool();
 
     const result = await workerPool.exec('./test-worker', 'test', 'test', 100);
@@ -12,19 +12,19 @@ describe('WorkerPool', async () => {
     assert.equal(result, 'test');
   });
 
-  it('proxies a function exported by a worker module', async () => {
+  it('proxies a function exported by a worker module', async function () {
     const workerPool = new WorkerPool();
 
-    const test = workerPool.proxy('./test-worker', 'test');
+    const testFunc = workerPool.proxy('./test-worker', 'test');
 
-    const result = await test('test');
+    const result = await testFunc('test');
 
     workerPool.stop();
 
     assert.equal(result, 'test');
   });
 
-  it('properly handles child processes that exit unexpectedly', async () => {
+  it('properly handles child processes that exit unexpectedly', async function () {
     const workerPool = new WorkerPool();
 
     const exit = workerPool.proxy('./test-worker', 'exit');
@@ -35,27 +35,27 @@ describe('WorkerPool', async () => {
       assert.isNotNull(err);
     }
 
-    const test = workerPool.proxy('./test-worker', 'test');
+    const testFunc = workerPool.proxy('./test-worker', 'test');
 
-    const result = await test('test');
+    const result = await testFunc('test');
 
     workerPool.stop();
 
     assert.equal(result, 'test');
   });
 
-  it('recycles a worker pool', async () => {
+  it('recycles a worker pool', async function () {
     const workerPool = new WorkerPool();
 
-    const test = workerPool.proxy('./test-worker', 'test');
+    const testFunc = workerPool.proxy('./test-worker', 'test');
 
-    test('test', 100)
+    testFunc('test', 100)
       .then(() => {})
       .catch((err) => {});
 
     workerPool.recycle();
 
-    const result = await test('test', 100);
+    const result = await testFunc('test', 100);
 
     workerPool.stop();
 

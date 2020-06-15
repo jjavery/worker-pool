@@ -1,6 +1,5 @@
 const debug = require('debug')('worker-pool:worker');
 const { deserializeError } = require('serialize-error');
-const { exit } = require('../test/test-worker');
 
 class Worker {
   _genericPool;
@@ -9,7 +8,7 @@ class Worker {
   _acquiringChildProcess = null;
   _messageListener = null;
   _exitListener = null;
-  _requests = {};
+  _requests = new Map();
   _id = 0;
 
   get queued() {
@@ -96,15 +95,15 @@ class Worker {
     childProcess.send(messageToSend, sendHandle);
 
     return new Promise((resolve, reject) => {
-      this._requests[id] = { resolve, reject };
+      this._requests.set(id, { resolve, reject });
     });
   }
 
   _response(message) {
     const { id, err, result } = message;
 
-    const { resolve, reject } = this._requests[id];
-    delete this._requests[id];
+    const { resolve, reject } = this._requests.get(id);
+    this._requests.delete(id);
 
     debug('Received message from child process [%d]:', this._childProcess.pid);
     debug('%j', message);
@@ -130,17 +129,15 @@ class Worker {
 
   _cleanup() {
     const requests = this._requests;
-    const ids = Object.keys(requests);
 
-    if (ids.length > 0) {
+    if (requests.size > 0) {
       debug('Child process [%d] exited unexpectedly', this._childProcess.pid);
-    }
 
-    for (let id of ids) {
-      const { reject } = requests[id];
-      delete requests[id];
+      for (let [id, { reject }] of requests) {
+        requests.delete(id);
 
-      reject(new Error('Child process exited unexpectedly'));
+        reject(new Error('Child process exited unexpectedly'));
+      }
     }
   }
 

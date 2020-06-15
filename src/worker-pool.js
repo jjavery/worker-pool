@@ -17,7 +17,6 @@ const defaultMax = Math.max(1, Math.min(os.cpus().length - 1, 3));
  * @extends EventEmitter
  */
 class WorkerPool extends EventEmitter {
-  _serialization = 'json';
   _cwd;
   _args;
   _env;
@@ -28,11 +27,13 @@ class WorkerPool extends EventEmitter {
   _signal;
   _strategy;
   _full;
-  _round = 0;
+  _serialization = 'json';
 
   _genericPool;
-
   _workers = [];
+  _draining = new Map();
+
+  _round = 0;
 
   /**
    * @param {Object} options={} - Optional parameters
@@ -71,20 +72,19 @@ class WorkerPool extends EventEmitter {
     this._min = min;
     this._max = max;
     this._idle = idle;
-
     this._timeout = timeout;
     this._signal = signal;
     this._strategy = strategy;
     this._full = full;
 
-    this._createGenericPool();
+    this._createGenericPoolAndWorkers();
 
     debug('Worker pool started');
 
     this.emit('start');
   }
 
-  _createGenericPool() {
+  _createGenericPoolAndWorkers() {
     const factory = {
       create: () => {
         return this._createChildProcess(
@@ -119,37 +119,50 @@ class WorkerPool extends EventEmitter {
   }
 
   info() {
-    return {
-      workers: this._workers.map(({ queued, _childProcess }) => ({
-        pid: _childProcess ? _childProcess.pid : null,
-        queued
-      }))
+    const result = {
+      workers: [],
+      processes: []
     };
+
+    for (let [genericPool, workers] of this._draining) {
+      addToResult(genericPool, workers);
+    }
+
+    addToResult(this._genericPool, this._workers);
+
+    function addToResult(genericPool, workers) {
+      for ({ queued, _childProcess } of workers) {
+        result.workers.push({
+          queued,
+          pid: _childProcess ? _childProcess.pid : null
+        });
+      }
+      for ({
+        obj: { exitCode, pid },
+        state
+      } of genericPool._allObjects) {
+        result.processes.push({
+          exitCode,
+          pid,
+          state
+        });
+      }
+    }
+
+    return result;
   }
 
   /**
    * Stops the worker pool, gracefully shutting down each child process
    */
-  stop(silent = false) {
-    if (!silent) {
-      debug('Stopping worker pool');
-    }
+  stop() {
+    debug('Stopping worker pool');
 
-    const genericPool = this._genericPool;
+    this._stop().then(() => {
+      debug('Worker pool stopped');
 
-    genericPool
-      .drain()
-      .then(() => genericPool.clear())
-      .catch((err) => {
-        this.emit('error', err);
-      })
-      .finally(() => {
-        if (!silent) {
-          debug('Worker pool stopped');
-
-          this.emit('stop');
-        }
-      });
+      this.emit('stop');
+    });
   }
 
   /**
@@ -159,10 +172,46 @@ class WorkerPool extends EventEmitter {
   recycle() {
     debug('Recycling worker pool');
 
-    this.stop(true);
-    this._createGenericPool();
+    // Stop the existing generic pool
+    this._stop().then(() => {
+      debug('Worker pool recycled');
 
-    debug('Worker pool recycled');
+      this.emit('recycle');
+    });
+
+    // Create a new generic pool and set of workers
+    this._createGenericPoolAndWorkers();
+  }
+
+  async _stop() {
+    const genericPool = this._genericPool;
+
+    this._addDraining(genericPool);
+
+    try {
+      await genericPool.drain();
+      await genericPool.clear();
+    } catch (err) {
+      this.emit('error', err);
+    } finally {
+      this._removeDraining(genericPool);
+    }
+  }
+
+  /**
+   * Keep references to a generic pool and workers while draining
+   * @private
+   */
+  _addDraining(genericPool) {
+    this._draining.set(genericPool, this._workers);
+  }
+
+  /**
+   * Clean up the references to the drained generic pool and workers
+   * @private
+   */
+  _removeDraining(genericPool) {
+    this._draining.delete(genericPool);
   }
 
   /**
