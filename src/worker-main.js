@@ -12,7 +12,7 @@ process.on('message', handleRequest);
 process.send('ready');
 
 function handleRequest(message) {
-  const { id, modulePath, functionName, args } = message;
+  const { id, modulePath, functionName, args = [] } = message;
 
   let module;
 
@@ -35,7 +35,14 @@ function handleRequest(message) {
     return;
   }
 
-  const resultOrPromise = fn(...args);
+  let resultOrPromise;
+
+  try {
+    resultOrPromise = fn(...args);
+  } catch (err) {
+    handleError(id, err);
+    return;
+  }
 
   Promise.resolve(resultOrPromise)
     .then((result) => {

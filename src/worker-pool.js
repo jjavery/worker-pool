@@ -1,18 +1,26 @@
 const EventEmitter = require('events');
 const path = require('path');
 const os = require('os');
-const child_process = require('child_process');
 const debug = require('debug')('worker-pool');
-const genericPool = require('generic-pool');
 const Worker = require('./worker');
 
-const debug_exec = debug.extend('exec');
+const debug_call = debug.extend('call');
 
-const workerMain = `${__dirname}/worker-main.js`;
-const defaultMax = Math.max(1, Math.min(os.cpus().length - 1, 3));
+const DEFAULT_MAX = Math.max(1, Math.min(os.cpus().length - 1, 3));
+const DEFAULT_IDLE = 10000;
+const DEFAULT_TIMEOUT = 10000;
+const DEFAULT_SIGNAL = 'SIGTERM';
+const DEFAULT_STRATEGY = 'fewest';
+const DEFAULT_FULL = 10;
+
+class NoWorkersError extends Error {
+  constructor() {
+    super('There are no workers available in this work pool');
+  }
+}
 
 /**
- * Provides a pool of child processes and the ability to instruct those
+ * Provides a pool of worker processes and the ability to instruct those
  * processes to require modules and call their exported functions.
  * @extends EventEmitter
  */
@@ -29,36 +37,56 @@ class WorkerPool extends EventEmitter {
   _full;
   _serialization = 'json';
 
-  _genericPool;
   _workers = [];
-  _draining = new Map();
+  _stopping = [];
 
   _round = 0;
 
+  get cwd() {
+    return this._cwd;
+  }
+  set cwd(value) {
+    this._cwd = value;
+  }
+
+  get args() {
+    return this._args;
+  }
+  set args(value) {
+    this._args = value;
+  }
+
+  get env() {
+    return this._env;
+  }
+  set env(value) {
+    this._env = value;
+  }
+
   /**
    * @param {Object} options={} - Optional parameters
-   * @param {number} options.cwd - The current working directory for child processes
-   * @param {number} options.args - Arguments to pass to child processes
-   * @param {number} options.env - Environmental variables to pass to child processes
-   * @param {number} options.min=0 - The minimum number of child processes in the pool
-   * @param {number} options.max=3 - The maximum number of child processes in the pool
+   * @param {number} options.cwd - The current working directory for worker processes
+   * @param {number} options.args - Arguments to pass to worker processes
+   * @param {number} options.env - Environmental variables to set for worker processes
+   * @param {number} options.min=0 - The minimum number of worker processes in the pool
+   * @param {number} options.max=3 - The maximum number of worker processes in the pool
    * @param {number} options.idle=10000 - Milliseconds before an idle process will be removed from the pool
-   * @param {number} options.timeout=10000 - Milliseconds before a child process will receive SIGKILL after receiving the initial signal, if it has not already exited
-   * @param {'SIGTERM'|'SIGINT'|'SIGHUP'|'SIGKILL'} options.signal='SIGTERM' - Initial signal to send when destroying child processes
-   * @param {'fewest'|'fill'|'round-robin'|'random'} options.strategy='fewest' - The strategy to use when routing requests to child processes
-   * @param {number} options.full=10 - The number of requests per child process used by the 'fill' strategy
+   * @param {number} options.timeout=10000 - Milliseconds before a worker process will receive SIGKILL after receiving the initial signal, if it has not already exited
+   * @param {'SIGTERM'|'SIGINT'|'SIGHUP'|'SIGKILL'} options.signal='SIGTERM' - Initial signal to send when destroying worker processes
+   * @param {'fewest'|'fill'|'round-robin'|'random'} options.strategy='fewest' - The strategy to use when routing requests to worker processes
+   * @param {number} options.full=10 - The number of requests per worker process used by the 'fill' strategy
    */
   constructor({
     cwd,
     args,
     env,
     min = 0,
-    max = defaultMax,
-    idle = 10000,
-    timeout = 10000,
-    signal = 'SIGTERM',
-    strategy = 'fewest',
-    full = 10
+    max = DEFAULT_MAX,
+    idle = DEFAULT_IDLE,
+    timeout = DEFAULT_TIMEOUT,
+    signal = DEFAULT_SIGNAL,
+    strategy = DEFAULT_STRATEGY,
+    full = DEFAULT_FULL
   } = {}) {
     super();
 
@@ -77,44 +105,35 @@ class WorkerPool extends EventEmitter {
     this._strategy = strategy;
     this._full = full;
 
-    this._createGenericPoolAndWorkers();
+    this._createWorkers();
 
     debug('Worker pool started');
 
     this.emit('start');
   }
 
-  _createGenericPoolAndWorkers() {
-    const factory = {
-      create: () => {
-        return this._createChildProcess(
-          workerMain,
-          this._args,
-          this._cwd,
-          this._env
-        );
-      },
-      destroy: (childProcess) => {
-        this._destroyChildProcess(childProcess);
-      }
-    };
-
-    const options = {
-      min: this._min,
-      max: this._max,
-      softIdleTimeoutMillis: this._idle,
-      idleTimeoutMillis: 2 ** 31 - 1,
-      evictionRunIntervalMillis: 1000
-    };
-
-    this._genericPool = genericPool.createPool(factory, options);
-
-    this._workers = [];
+  _createWorkers() {
+    const workers = (this._workers = []);
+    const min = this._min;
 
     for (let i = 0, max = this._max; i < max; ++i) {
-      const worker = new Worker(this._genericPool);
+      const worker = new Worker({
+        args: this._args,
+        cwd: this._cwd,
+        env: this._env,
+        timeout: this._timeout,
+        stopWhenIdle: () => this._stopWhenIdle(),
+        signal: this._signal
+      });
 
-      this._workers.push(worker);
+      if (i < min) {
+        worker
+          .start()
+          .then(() => {})
+          .catch(() => {});
+      }
+
+      workers.push(worker);
     }
   }
 
@@ -124,27 +143,15 @@ class WorkerPool extends EventEmitter {
       processes: []
     };
 
-    for (let [genericPool, workers] of this._draining) {
-      addToResult(genericPool, workers);
-    }
+    addToResult(this._stopping);
+    addToResult(this._workers);
 
-    addToResult(this._genericPool, this._workers);
-
-    function addToResult(genericPool, workers) {
-      for ({ queued, _childProcess } of workers) {
+    function addToResult(workers) {
+      for ({ waiting, _childProcess } of workers) {
         result.workers.push({
-          queued,
-          pid: _childProcess ? _childProcess.pid : null
-        });
-      }
-      for ({
-        obj: { exitCode, pid },
-        state
-      } of genericPool._allObjects) {
-        result.processes.push({
-          exitCode,
-          pid,
-          state
+          waiting,
+          pid: _childProcess?.pid ?? null,
+          exitCode: _childProcess?.exitCode ?? null
         });
       }
     }
@@ -153,97 +160,92 @@ class WorkerPool extends EventEmitter {
   }
 
   /**
-   * Stops the worker pool, gracefully shutting down each child process
+   * Stops the worker pool, gracefully shutting down each worker process
    */
   stop() {
     debug('Stopping worker pool');
 
-    this._stop().then(() => {
-      debug('Worker pool stopped');
+    const workers = this._workers;
+    this._workers = [];
 
-      this.emit('stop');
-    });
+    this._stop(workers)
+      .then(() => {
+        debug('Worker pool stopped');
+
+        this.emit('stop');
+      })
+      .catch((err) => {
+        console.log(err);
+      });
   }
 
   /**
-   * Recycle the worker pool, gracefully shutting down existing child processes
-   * and starting up new child processes
+   * Recycle the worker pool, gracefully shutting down existing worker processes
+   * and starting up new worker processes
    */
   recycle() {
     debug('Recycling worker pool');
 
-    // Stop the existing generic pool
-    this._stop().then(() => {
-      debug('Worker pool recycled');
+    const workers = this._workers;
 
-      this.emit('recycle');
+    // Create a new set of workers
+    this._createWorkers();
+
+    // Stop the old workers
+    this._stop(workers)
+      .then(() => {
+        debug('Worker pool recycled');
+
+        this.emit('recycle');
+      })
+      .catch((err) => {
+        console.log(err);
+      });
+  }
+
+  async _stop(workers) {
+    const stopping = this._stopping;
+    stopping.push(...workers);
+
+    const stopAllWorkers = workers.map((worker) => worker.stop());
+
+    await Promise.all(stopAllWorkers).then(() => {
+      for (var worker of workers) {
+        stopping.splice(stopping.indexOf(worker), 1);
+      }
     });
-
-    // Create a new generic pool and set of workers
-    this._createGenericPoolAndWorkers();
-  }
-
-  async _stop() {
-    const genericPool = this._genericPool;
-
-    this._addDraining(genericPool);
-
-    try {
-      await genericPool.drain();
-      await genericPool.clear();
-    } catch (err) {
-      this.emit('error', err);
-    } finally {
-      this._removeDraining(genericPool);
-    }
   }
 
   /**
-   * Keep references to a generic pool and workers while draining
-   * @private
-   */
-  _addDraining(genericPool) {
-    this._draining.set(genericPool, this._workers);
-  }
-
-  /**
-   * Clean up the references to the drained generic pool and workers
-   * @private
-   */
-  _removeDraining(genericPool) {
-    this._draining.delete(genericPool);
-  }
-
-  /**
-   * Sends a request to a child process in the pool asking it to require a module and call a function with the provided arguments
-   * @param {string} modulePath - The module path for the child process to require()
+   * Sends a request to a worker process in the pool asking it to require a module and call a function with the provided arguments
+   * @param {string} modulePath - The module path for the worker process to require()
    * @param {string} functionName - The name of a function expored by the required module
    * @param {...any} args - Arguments to pass when invoking function
    * @returns {Promise} The result of the function invocation
    */
-  async exec(modulePath, functionName, ...args) {
+  async call(modulePath, functionName, ...args) {
     const resolvedModulePath = this._resolve(modulePath);
 
-    return this._exec(resolvedModulePath, functionName, args);
+    return this._call(resolvedModulePath, functionName, args);
   }
 
   /**
-   * Creates a proxy function that will call WorkerPool#exec() with the provided module path and function name
-   * @param {string} modulePath - The module path for the child process to require()
+   * Creates a proxy function that will call WorkerPool#call() with the provided module path and function name
+   * @param {string} modulePath - The module path for the worker process to require()
    * @param {string} functionName - The name of a function expored by the required module
-   * @returns {Function} A function that returns a Promise and calls the child process function with the provided args
+   * @returns {Function} A function that returns a Promise and calls the worker process function with the provided args
    */
   proxy(modulePath, functionName) {
     const resolvedModulePath = this._resolve(modulePath);
 
     return async (...args) => {
-      return this._exec(resolvedModulePath, functionName, args);
+      return this._call(resolvedModulePath, functionName, args);
     };
   }
 
-  async _exec(resolvedModulePath, functionName, args) {
-    debug_exec(
-      'Executing module "%s" function "%s" with args %j',
+  async _call(resolvedModulePath, functionName, args) {
+    debug_call(
+      'Calling module "%s" function "%s" with args %j',
       resolvedModulePath,
       functionName,
       args
@@ -251,23 +253,13 @@ class WorkerPool extends EventEmitter {
 
     const worker = this._getWorker();
 
-    await worker.acquire();
+    const result = await worker.request({
+      modulePath: resolvedModulePath,
+      functionName,
+      args
+    });
 
-    let reply;
-
-    try {
-      reply = await worker.request({
-        modulePath: resolvedModulePath,
-        functionName,
-        args
-      });
-    } catch (err) {
-      throw err;
-    } finally {
-      worker.release();
-    }
-
-    return reply;
+    return result;
   }
 
   _resolve(modulePath) {
@@ -279,6 +271,10 @@ class WorkerPool extends EventEmitter {
   }
 
   _getWorker() {
+    if (this._workers.length === 0) {
+      throw new NoWorkersError();
+    }
+
     switch (this._strategy) {
       case 'fewest':
         return this._fewestStrategy();
@@ -293,101 +289,6 @@ class WorkerPool extends EventEmitter {
     }
   }
 
-  _createChildProcess(modulePath, args, cwd, env) {
-    return new Promise((resolve, reject) => {
-      debug('Creating child process from "%s"', modulePath);
-
-      const options = { cwd, env, serialization: this._serialization };
-
-      // Start a child process
-      const childProcess = child_process.fork(modulePath, args, options);
-
-      // Wait for a 'ready' message
-      childProcess.on('message', handleMessage);
-
-      function handleMessage(message) {
-        if (message === 'ready') {
-          debug('Created child process [%d]', childProcess.pid);
-
-          this.emit('createChildProcess', childProcess);
-
-          removeListeners();
-
-          resolve(childProcess);
-        }
-      }
-
-      // Handle startup error
-      childProcess.once('error', handleError);
-
-      function handleError(err) {
-        debug('Child process error [%d]', childProcess.pid);
-        debug('%j', err);
-
-        removeListeners();
-
-        reject(err);
-      }
-
-      // Time out waiting for 'ready' message
-      const timer = setTimeout(() => {
-        removeListeners();
-        reject(
-          new Error(
-            'Timed out waiting for child process [%d] to send ready message',
-            childProcess.pid
-          )
-        );
-      }, 1000);
-
-      function removeListeners() {
-        childProcess.removeListener('message', handleMessage);
-        childProcess.removeListener('error', handleError);
-        clearTimeout(timer);
-      }
-    });
-  }
-
-  _destroyChildProcess(childProcess) {
-    if (childProcess.exitCode !== null) {
-      debug(
-        "Won't destroy child process [%d] because it has already exited",
-        childProcess.pid
-      );
-      return;
-    }
-
-    debug('Destroying child process [%d]', childProcess.pid);
-
-    const signal = this._signal;
-
-    // Don't bother with the timeout if the first signal is SIGKILL
-    if (signal !== 'SIGKILL') {
-      // Set up a timer to send SIGKILL to the child process after the timeout
-      const timer = setTimeout(() => {
-        debug(
-          'Child process [%d] [%s] timed out; sending SIGKILL',
-          childProcess.pid,
-          signal
-        );
-        childProcess.kill('SIGKILL');
-      }, this._timeout);
-
-      // Don't let this timer keep the (parent) process alive
-      timer.unref();
-
-      // If the child process does exit before the timeout, clear the timer
-      childProcess.once('exit', () => clearTimeout(timer));
-    }
-
-    // Ask the child process to stop
-    childProcess.kill(signal);
-
-    debug('Destroyed child process [%d]', childProcess.pid);
-
-    this.emit('destroyChildProcess', childProcess);
-  }
-
   /**
    * Return the worker with the fewest number of queued requests
    * @private
@@ -400,7 +301,7 @@ class WorkerPool extends EventEmitter {
     for (let i = 1, len = workers.length; i < len; ++i) {
       const candidate = workers[i];
 
-      if (candidate.queued < worker.queued) {
+      if (candidate.waiting < worker.waiting) {
         worker = candidate;
       }
     }
@@ -425,17 +326,17 @@ class WorkerPool extends EventEmitter {
 
     for (let i = 1, len = workers.length; i < len; ++i) {
       const candidate = workers[i];
-      const candidateQueued = candidate.queued;
+      const candidateWaiting = candidate.waiting;
 
-      if (candidateQueued >= worker.queued && candidateQueued < full) {
+      if (candidateWaiting >= worker.waiting && candidateWaiting < full) {
         worker = workers[i];
       }
-      if (candidateQueued < fewest.queued) {
+      if (candidateWaiting < fewest.waiting) {
         fewest = candidate;
       }
     }
 
-    if (worker.queued >= full) {
+    if (worker.waiting >= full) {
       worker = fewest;
     }
 
@@ -468,6 +369,23 @@ class WorkerPool extends EventEmitter {
 
     return workers[random];
   }
+
+  _stopWhenIdle() {
+    const min = this._min;
+
+    if (min === 0) {
+      return true;
+    }
+
+    const count = this._workers.reduce(
+      (count, worker) => (worker.pid != null ? count++ : count),
+      0
+    );
+
+    return count > min;
+  }
+
+  static NoWorkersError = NoWorkersError;
 }
 
 module.exports = WorkerPool;
