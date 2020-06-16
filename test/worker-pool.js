@@ -2,10 +2,10 @@ const { assert } = require('chai');
 const WorkerPool = require('../src/worker-pool');
 
 describe('WorkerPool', function () {
-  it('execues a function exported by a worker module', async function () {
+  it('calls a function exported by a worker module', async function () {
     const workerPool = new WorkerPool();
 
-    const result = await workerPool.exec('./test-worker', 'test', 'test', 100);
+    const result = await workerPool.call('./test-worker', 'test', 'test', 100);
 
     workerPool.stop();
 
@@ -51,13 +51,15 @@ describe('WorkerPool', function () {
 
     testFunc('test', 100)
       .then(() => {})
-      .catch((err) => {});
+      .catch((err) => {
+        console.log(err);
+      });
 
     workerPool.recycle();
 
     const result = await testFunc('test', 100);
 
-    workerPool.stop();
+    await workerPool.stop();
 
     assert.equal(result, 'test');
   });

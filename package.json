@@ -1,6 +1,6 @@
 {
   "name": "@jjavery/worker-pool",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A worker pool for Node.js applications",
   "keywords": [
     "worker pool",
@@ -21,18 +21,22 @@
     "test": "test"
   },
   "scripts": {
-    "test": "mocha",
+    "test": "nyc mocha",
     "docs": "jsdoc2md --template README.template.hbs.md --plugin @jjavery/dmd-jjavery --files src/*.js > README.md"
   },
   "devDependencies": {
     "@jjavery/dmd-jjavery": "^0.1.0",
+    "babel-eslint": "^10.1.0",
     "chai": "^4.2.0",
+    "eslint": "^7.2.0",
+    "eslint-plugin-mocha": "^7.0.1",
+    "eslint-plugin-promise": "^4.2.1",
     "jsdoc-to-markdown": "^6.0.1",
-    "mocha": "^8.0.1"
+    "mocha": "^8.0.1",
+    "nyc": "^15.1.0"
   },
   "dependencies": {
     "debug": "^4.1.1",
-    "generic-pool": "^3.7.1",
     "serialize-error": "^7.0.1"
   },
   "engines": {
