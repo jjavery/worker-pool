@@ -1,6 +1,6 @@
 {
   "name": "@jjavery/worker-pool",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "A worker pool for Node.js applications",
   "keywords": [
     "worker pool",
@@ -13,19 +13,25 @@
   "license": "MIT",
   "author": "James P. Javery <james.javery@gmail.com> (https://github.com/jjavery)",
   "files": [
-    "src"
+    "dist"
   ],
   "repository": "jjavery/worker-pool",
-  "main": "src/worker-pool.js",
+  "main": "dist/worker-pool.js",
   "directories": {
     "test": "test"
   },
   "scripts": {
-    "test": "mocha",
+    "build": "babel src -d dist && npm run docs",
+    "test": "mocha --require @babel/register",
     "coverage": "nyc mocha",
-    "docs": "jsdoc2md --template README.template.hbs.md --plugin @jjavery/dmd-jjavery --files src/*.js > README.md"
+    "docs": "jsdoc2md --template README.template.hbs.md --plugin @jjavery/dmd-jjavery --files src/*.js > README.md",
+    "prepublish": "npm run build"
   },
   "devDependencies": {
+    "@babel/cli": "^7.10.1",
+    "@babel/core": "^7.10.2",
+    "@babel/preset-env": "^7.10.2",
+    "@babel/register": "^7.10.1",
     "@jjavery/dmd-jjavery": "^0.1.0",
     "babel-eslint": "^10.1.0",
     "chai": "^4.2.0",
@@ -41,7 +47,7 @@
     "serialize-error": "^7.0.1"
   },
   "engines": {
-    "node": ">=12.0.0"
+    "node": ">=10.0.0"
   },
   "mocha": {
     "recursive": true,

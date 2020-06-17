@@ -7,9 +7,9 @@ const Worker = require('./worker');
 const debug_call = debug.extend('call');
 
 const DEFAULT_MAX = Math.max(1, Math.min(os.cpus().length - 1, 3));
-const DEFAULT_IDLE = 10000;
-const DEFAULT_TIMEOUT = 10000;
-const DEFAULT_SIGNAL = 'SIGTERM';
+const DEFAULT_IDLE_TIMEOUT = 10000;
+const DEFAULT_STOP_TIMEOUT = 10000;
+const DEFAULT_STOP_SIGNAL = 'SIGTERM';
 const DEFAULT_STRATEGY = 'fewest';
 const DEFAULT_FULL = 10;
 
@@ -20,19 +20,43 @@ class NotStartedError extends Error {
 }
 
 /**
- * Provides a pool of worker processes and the ability to instruct those
- * processes to require modules and call their exported functions.
+ * Provides a load-balancing and (optionally) auto-scaling pool of worker
+ * processes and the ability to request for worker processes to import modules,
+ * call their exported functions, and reply with their return values and thrown
+ * exceptions. Load balancing and auto-scaling is configurable via min/max
+ * limits, strategies, and timeouts.
  * @extends EventEmitter
  */
 class WorkerPool extends EventEmitter {
+  /**
+   * Emitted when an error is thrown in the constructor.
+   * @event WorkerPool#error
+   * @type {Error} - The error object that was thrown.
+   */
+
+  /**
+   * Emitted when the worker pool starts.
+   * @event WorkerPool#start
+   */
+
+  /**
+   * Emitted when the worker pool recycles.
+   * @event WorkerPool#recycle
+   */
+
+  /**
+   * Emitted when the worker pool stops.
+   * @event WorkerPool#stop
+   */
+
   _cwd;
   _args;
   _env;
   _min;
   _max;
-  _idle;
-  _timeout;
-  _signal;
+  _idleTimeout;
+  _stopTimeout;
+  _stopSignal;
   _strategy;
   _full;
   _serialization = 'json';
@@ -42,6 +66,17 @@ class WorkerPool extends EventEmitter {
 
   _round = 0;
 
+  /**
+   * The current working directory for worker processes. Takes effect after start/recycle.
+   *
+   * @example
+   *
+   * workerPool.cwd = `${versionPath}/workers`;
+   *
+   * await workerPool.recycle();
+   *
+   * @type {string}
+   */
   get cwd() {
     return this._cwd;
   }
@@ -49,6 +84,17 @@ class WorkerPool extends EventEmitter {
     this._cwd = value;
   }
 
+  /**
+   * Arguments to pass to worker processes. Takes effect after start/recycle.
+   *
+   * @example
+   *
+   * workerPool.args = [ '--verbose' ];
+   *
+   * await workerPool.recycle();
+   *
+   * @type {string[]}
+   */
   get args() {
     return this._args;
   }
@@ -56,6 +102,17 @@ class WorkerPool extends EventEmitter {
     this._args = value;
   }
 
+  /**
+   * Environmental variables to set for worker processes. Takes effect after start/recycle.
+   *
+   * @example
+   *
+   * workerPool.env = { TOKEN: newToken };
+   *
+   * await workerPool.recycle();
+   *
+   * @type {Object}
+   */
   get env() {
     return this._env;
   }
@@ -63,18 +120,34 @@ class WorkerPool extends EventEmitter {
     this._env = value;
   }
 
+  /**
+   * True if the worker pool is stopping
+   * @type {boolean}
+   */
   get isStopping() {
     return this._stopping.length > 0;
   }
 
+  /**
+   * True if the worker pool has stopped
+   * @type {boolean}
+   */
   get isStopped() {
     return this._stopping.length === 0 && this._workers.length === 0;
   }
 
+  /**
+   * True if the worker pool has started
+   * @type {boolean}
+   */
   get isStarted() {
     return this._workers.length > 0;
   }
 
+  /**
+   * Gets the current number of worker processes
+   * @returns {Number} The current number of worker processes
+   */
   getProcessCount() {
     return this._workers.reduce(
       (count, worker) => (worker.pid != null ? ++count : count),
@@ -83,18 +156,33 @@ class WorkerPool extends EventEmitter {
   }
 
   /**
+   * @example
+   *
+   * const workerPool = new WorkerPool(
+   *   cwd: `${versionPath}/workers`,
+   *   args: [ '--verbose' ],
+   *   env: { TOKEN: token },
+   *   min: 1,
+   *   max: 4,
+   *   idleTimeout: 30000,
+   *   stopTimeout: 1000,
+   *   stopSignal: 'SIGINT'
+   *   strategy: 'fill',
+   *   full: 100
+   * });
+   *
    * @param {Object} options={} - Optional parameters
-   * @param {number} options.cwd - The current working directory for worker processes
-   * @param {number} options.args - Arguments to pass to worker processes
-   * @param {number} options.env - Environmental variables to set for worker processes
+   * @param {string} options.cwd - The current working directory for worker processes
+   * @param {string[]} options.args - Arguments to pass to worker processes
+   * @param {Object} options.env - Environmental variables to set for worker processes
    * @param {number} options.min=0 - The minimum number of worker processes in the pool
    * @param {number} options.max=3 - The maximum number of worker processes in the pool
-   * @param {number} options.idle=10000 - Milliseconds before an idle process will be removed from the pool
-   * @param {number} options.timeout=10000 - Milliseconds before a worker process will receive SIGKILL after receiving the initial signal, if it has not already exited
-   * @param {'SIGTERM'|'SIGINT'|'SIGHUP'|'SIGKILL'} options.signal='SIGTERM' - Initial signal to send when destroying worker processes
-   * @param {'fewest'|'fill'|'round-robin'|'random'} options.strategy='fewest' - The strategy to use when routing requests to worker processes
-   * @param {number} options.full=10 - The number of requests per worker process used by the 'fill' strategy
-   * @param {boolean} options.start=true - Whether to automatically start the worker pool
+   * @param {number} options.idleTimeout=10000 - Milliseconds before an idle worker process will be asked to stop via options.stopSignal
+   * @param {number} options.stopTimeout=10000 - Milliseconds before a worker process will receive SIGKILL after it has been asked to stop
+   * @param {'SIGTERM'|'SIGINT'|'SIGHUP'|'SIGKILL'} options.stopSignal='SIGTERM' - Initial signal to send when stopping worker processes
+   * @param {'fewest'|'fill'|'round-robin'|'random'} options.strategy='fewest' - The strategy to use when routing calls to workers
+   * @param {number} options.full=10 - The number of requests per worker used by the 'fill' strategy
+   * @param {boolean} options.start=true - Whether to automatically start this worker pool
    */
   constructor({
     cwd,
@@ -102,9 +190,9 @@ class WorkerPool extends EventEmitter {
     env,
     min = 0,
     max = DEFAULT_MAX,
-    idle = DEFAULT_IDLE,
-    timeout = DEFAULT_TIMEOUT,
-    signal = DEFAULT_SIGNAL,
+    idleTimeout = DEFAULT_IDLE_TIMEOUT,
+    stopTimeout = DEFAULT_STOP_TIMEOUT,
+    stopSignal = DEFAULT_STOP_SIGNAL,
     strategy = DEFAULT_STRATEGY,
     full = DEFAULT_FULL,
     start = true
@@ -120,9 +208,9 @@ class WorkerPool extends EventEmitter {
     this._env = env;
     this._min = min;
     this._max = max;
-    this._idle = idle;
-    this._timeout = timeout;
-    this._signal = signal;
+    this._idleTimeout = idleTimeout;
+    this._stopTimeout = stopTimeout;
+    this._stopSignal = stopSignal;
     this._strategy = strategy;
     this._full = full;
 
@@ -135,6 +223,9 @@ class WorkerPool extends EventEmitter {
 
   /**
    * Starts the worker pool
+   * @returns {Promise}
+   * @resolves When the worker pool has started
+   * @rejects {WorkerPool.NotReadyError | Error} When an error has been thrown
    */
   async start() {
     if (this.isStarted) {
@@ -154,6 +245,9 @@ class WorkerPool extends EventEmitter {
 
   /**
    * Stops the worker pool, gracefully shutting down each worker process
+   * @returns {Promise}
+   * @resolves When the worker pool has stopped
+   * @rejects {Error} When an error has been thrown
    */
   async stop() {
     debug('Stopping worker pool');
@@ -171,6 +265,9 @@ class WorkerPool extends EventEmitter {
   /**
    * Recycle the worker pool, gracefully shutting down existing worker processes
    * and starting up new worker processes
+   * @returns {Promise}
+   * @resolves When the worker pool has recycled
+   * @rejects {WorkerPool.NotReadyError | Error} When an error has been thrown
    */
   async recycle() {
     debug('Recycling worker pool');
@@ -198,9 +295,10 @@ class WorkerPool extends EventEmitter {
         args: this._args,
         cwd: this._cwd,
         env: this._env,
-        timeout: this._timeout,
-        stopWhenIdle: () => this._stopWhenIdle(),
-        signal: this._signal
+        idleTimeout: this._idleTimeout,
+        stopTimeout: this._stopTimeout,
+        signal: this._stopSignal,
+        stopWhenIdle: () => this._stopWhenIdle()
       });
 
       workers.push(worker);
@@ -230,11 +328,20 @@ class WorkerPool extends EventEmitter {
   }
 
   /**
-   * Sends a request to a worker process in the pool asking it to require a module and call a function with the provided arguments
-   * @param {string} modulePath - The module path for the worker process to require()
-   * @param {string} functionName - The name of a function expored by the required module
-   * @param {...any} args - Arguments to pass when invoking function
-   * @returns {Promise} The result of the function invocation
+   * Routes a request to a worker in the pool asking it to import a module and call a function with the provided arguments.
+   *
+   * **Note**: WorkerPool#call() uses JSON serialization to communicate with worker processes, so only types/objects that can survive JSON.stringify()/JSON.parse() will be passed through unchanged.
+   *
+   * @example
+   *
+   * const result = await workerPool.call('user-module', 'hashPassword', password, salt);
+   *
+   * @param {string} modulePath - The module path for the worker process to import
+   * @param {string} functionName - The name of a function expored by the imported module
+   * @param {...any} args - Arguments to pass when calling the function
+   * @returns {Promise}
+   * @resolves {any} The return value of the function call when the call returns
+   * @rejects {WorkerPool.UnexpectedExitError | WorkerPool.WorkerError | Error} When an error has been thrown
    */
   async call(modulePath, functionName, ...args) {
     const resolvedModulePath = this._resolve(modulePath);
@@ -243,10 +350,19 @@ class WorkerPool extends EventEmitter {
   }
 
   /**
-   * Creates a proxy function that will call WorkerPool#call() with the provided module path and function name
-   * @param {string} modulePath - The module path for the worker process to require()
-   * @param {string} functionName - The name of a function expored by the required module
-   * @returns {Function} A function that returns a Promise and calls the worker process function with the provided args
+   * Creates a proxy function that will call WorkerPool#call() with the provided module path, function name, and arguments. Provided as a convenience and minor performance improvement as the modulePath will only be resolved when creating the proxy, rather than with each call.
+   *
+   * **Note**: WorkerPool#proxy() uses JSON serialization to communicate with worker processes, so only types/objects that can survive JSON.stringify()/JSON.parse() will be passed through unchanged.
+   *
+   * @example
+   *
+   * const hashPassword = workerPool.proxy('user-module', 'hashPassword');
+   *
+   * const hashedPassword = await hashPassword(password, salt);
+   *
+   * @param {string} modulePath - The module path for the worker process to import
+   * @param {string} functionName - The name of a function expored by the imported module
+   * @returns {Function} A function that calls WorkerPool#call() with the provided modulePath, functionName, and args, and returns its Promise
    */
   proxy(modulePath, functionName) {
     const resolvedModulePath = this._resolve(modulePath);
@@ -303,7 +419,8 @@ class WorkerPool extends EventEmitter {
   }
 
   /**
-   * Return the worker with the fewest number of queued requests
+   * Return the worker with the fewest number of waiting requests, favoring
+   * workers that are already started
    * @private
    */
   _fewestStrategy() {
@@ -314,7 +431,12 @@ class WorkerPool extends EventEmitter {
     for (let i = 1, len = workers.length; i < len; ++i) {
       const candidate = workers[i];
 
-      if (candidate.waiting < worker.waiting) {
+      if (
+        candidate.waiting < worker.waiting ||
+        (candidate.waiting === 0 &&
+          candidate.isStarted &&
+          !worker.isStarted)
+      ) {
         worker = candidate;
       }
     }
@@ -395,7 +517,53 @@ class WorkerPool extends EventEmitter {
     return count > min;
   }
 
-  static NotRunningError = NotStartedError;
+  /**
+   * https://nodejs.org/api/events.html#events_emitter_once_eventname_listener
+   * @function JobQueue#once
+   * @param {string|symbol} eventName - The name of the event.
+   * @param {Function} listener - The callback function.
+   * @returns {EventEmitter}
+   */
+
+  /**
+   * https://nodejs.org/api/events.html#events_emitter_on_eventname_listener
+   * @function JobQueue#on
+   * @param {string|symbol} eventName - The name of the event.
+   * @param {Function} listener - The callback function.
+   * @returns {EventEmitter}
+   */
+
+  /**
+   * https://nodejs.org/api/events.html#events_emitter_off_eventname_listener
+   * @function JobQueue#off
+   * @param {string|symbol} eventName - The name of the event.
+   * @param {Function} listener - The callback function.
+   * @returns {EventEmitter}
+   */
 }
+
+/**
+ * Thrown when the worker pool is not started
+ * @Static
+ */
+WorkerPool.NotStartedError = NotStartedError;
+
+/**
+ * Thrown when a worker process doesn't signal that it is ready
+ * @Static
+ */
+WorkerPool.NotReadyError = Worker.NotReadyError;
+
+/**
+ * Thrown when a worker process exits unexpectedly
+ * @Static
+ */
+WorkerPool.UnexpectedExitError = Worker.UnexpectedExitError;
+
+/**
+ * Thrown when a function called by a worker process (or a worker process itself) throws an error
+ * @Static
+ */
+WorkerPool.WorkerError = Worker.WorkerError;
 
 module.exports = WorkerPool;

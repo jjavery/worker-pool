@@ -1,6 +1,14 @@
 # worker-pool
 
-A worker pool for Node.js applications
+A load-balancing and auto-scaling worker pool for Node.js applications
+
+## Features
+
+- **Load Balancing** Requests are sent to workers based on one of several of load balancing strategies
+- **Auto Scaling** Worker processes are started automatically when handling reqests and stopped automatically when idle
+- **Hot Reloading** Start a new set of workers while gracefully stopping the current workers
+- **Prestarting** Start one or more worker processes immediately and keep them running even when they're idle — initial or infrequent requests won't have to wait for worker process starts
+- **Simple Workers** A worker module is simply a module that exports one or more functions and (optionally) handles process signals
 
 ## Installation
 

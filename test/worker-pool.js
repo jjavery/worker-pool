@@ -104,7 +104,7 @@ describe('WorkerPool', function () {
     }
   });
 
-  it('properly handles child processes that exit unexpectedly', async function () {
+  it('properly handles worker processes that exit unexpectedly', async function () {
     const workerPool = new WorkerPool();
 
     const exit = workerPool.proxy('./test-worker', 'exit');
@@ -158,7 +158,23 @@ describe('WorkerPool', function () {
 
       assert.fail('Failed to throw');
     } catch (err) {
-      assert.instanceOf(err, WorkerPool.NotRunningError);
+      assert.instanceOf(err, WorkerPool.NotStartedError);
+    }
+  });
+
+  it('properly handles worker processes that throw errors', async function () {
+    const workerPool = new WorkerPool();
+
+    const throws = workerPool.proxy('./test-worker', 'throws');
+
+    try {
+      await throws();
+
+      assert.fail('Failed to throw');
+    } catch (err) {
+      assert.instanceOf(err, Worker.WorkerError);
+    } finally {
+      await workerPool.stop();
     }
   });
 

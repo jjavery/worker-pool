@@ -1,6 +1,14 @@
 # worker-pool
 
-A worker pool for Node.js applications
+A load-balancing and auto-scaling worker pool for Node.js applications
+
+## Features
+
+- **Load Balancing** Requests are sent to workers based on one of several of load balancing strategies
+- **Auto Scaling** Worker processes are started automatically when handling reqests and stopped automatically when idle
+- **Hot Reloading** Start a new set of workers while gracefully stopping the current workers
+- **Prestarting** Start one or more worker processes immediately and keep them running even when they're idle — initial or infrequent requests won't have to wait for worker process starts
+- **Simple Workers** A worker module is simply a module that exports one or more functions and (optionally) handles process signals
 
 ## Installation
 
@@ -74,89 +82,187 @@ module.exports = {
 
 # API Reference
 
-
 ## WorkerPool ⇐ EventEmitter
-Provides a pool of worker processes and the ability to instruct those
-processes to require modules and call their exported functions.
+Provides a load-balancing and (optionally) auto-scaling pool of worker
+processes and the ability to request for worker processes to import modules,
+call their exported functions, and reply with their return values and thrown
+exceptions. Load balancing and auto-scaling is configurable via min/max
+limits, strategies, and timeouts.
 
 **Extends**: EventEmitter  
 
 * [WorkerPool](#markdown-header-workerpool-eventemitter) ⇐ EventEmitter
     * [new WorkerPool(options)](#markdown-header-new-workerpooloptions)
-    * [.start()](#markdown-header-workerpoolstart)
-    * [.stop()](#markdown-header-workerpoolstop)
-    * [.recycle()](#markdown-header-workerpoolrecycle)
-    * [.call(modulePath, functionName, ...args)](#markdown-header-workerpoolcallmodulepath-functionname-args-promise) ⇒ Promise
-    * [.proxy(modulePath, functionName)](#markdown-header-workerpoolproxymodulepath-functionname-function) ⇒ function
+    * _instance_
+        * [.cwd](#markdown-header-workerpoolcwd-string) : string
+        * [.args](#markdown-header-workerpoolargs-arraystring) : Array.<string>
+        * [.env](#markdown-header-workerpoolenv-object) : Object
+        * [.isStopping](#markdown-header-workerpoolisstopping-boolean) : boolean
+        * [.isStopped](#markdown-header-workerpoolisstopped-boolean) : boolean
+        * [.isStarted](#markdown-header-workerpoolisstarted-boolean) : boolean
+        * [.getProcessCount()](#markdown-header-workerpoolgetprocesscount-number) ⇒ Number
+        * [.start()](#markdown-header-workerpoolstart-promise) ⇒ Promise
+        * [.stop()](#markdown-header-workerpoolstop-promise) ⇒ Promise
+        * [.recycle()](#markdown-header-workerpoolrecycle-promise) ⇒ Promise
+        * [.call(modulePath, functionName, ...args)](#markdown-header-workerpoolcallmodulepath-functionname-args-promise) ⇒ Promise
+        * [.proxy(modulePath, functionName)](#markdown-header-workerpoolproxymodulepath-functionname-function) ⇒ function
+        * ["error"](#markdown-header-error)
+        * ["start"](#markdown-header-start)
+        * ["recycle"](#markdown-header-recycle)
+        * ["stop"](#markdown-header-stop)
+    * _static_
+        * [.NotStartedError](#markdown-header-workerpoolnotstartederror)
+        * [.NotReadyError](#markdown-header-workerpoolnotreadyerror)
+        * [.UnexpectedExitError](#markdown-header-workerpoolunexpectedexiterror)
+        * [.WorkerError](#markdown-header-workerpoolworkererror)
 
 ### new WorkerPool(options)
 
 | Param | Type | Default | Description |
 | --- | --- | --- | --- |
 | options | Object | `{}` | Optional parameters |
-| options.cwd | number |  | The current working directory for worker processes |
-| options.args | number |  | Arguments to pass to worker processes |
-| options.env | number |  | Environmental variables to set for worker processes |
+| options.cwd | string |  | The current working directory for worker processes |
+| options.args | Array.<string> |  | Arguments to pass to worker processes |
+| options.env | Object |  | Environmental variables to set for worker processes |
 | options.min | number | `0` | The minimum number of worker processes in the pool |
 | options.max | number | `3` | The maximum number of worker processes in the pool |
-| options.idle | number | `10000` | Milliseconds before an idle process will be removed from the pool |
-| options.timeout | number | `10000` | Milliseconds before a worker process will receive SIGKILL after receiving the initial signal, if it has not already exited |
-| options.signal | 'SIGTERM' ⎮ 'SIGINT' ⎮ 'SIGHUP' ⎮ 'SIGKILL' | `'SIGTERM'` | Initial signal to send when destroying worker processes |
-| options.strategy | 'fewest' ⎮ 'fill' ⎮ 'round-robin' ⎮ 'random' | `'fewest'` | The strategy to use when routing requests to worker processes |
-| options.full | number | `10` | The number of requests per worker process used by the 'fill' strategy |
-| options.start | boolean | `true` | Whether to automatically start the worker pool |
+| options.idleTimeout | number | `10000` | Milliseconds before an idle worker process will be asked to stop via options.stopSignal |
+| options.stopTimeout | number | `10000` | Milliseconds before a worker process will receive SIGKILL after it has been asked to stop |
+| options.stopSignal | 'SIGTERM' ⎮ 'SIGINT' ⎮ 'SIGHUP' ⎮ 'SIGKILL' | `'SIGTERM'` | Initial signal to send when stopping worker processes |
+| options.strategy | 'fewest' ⎮ 'fill' ⎮ 'round-robin' ⎮ 'random' | `'fewest'` | The strategy to use when routing calls to workers |
+| options.full | number | `10` | The number of requests per worker used by the 'fill' strategy |
+| options.start | boolean | `true` | Whether to automatically start this worker pool |
 
-### workerPool.start()
+**Example**  
+```js
+const workerPool = new WorkerPool(
+  cwd: `${versionPath}/workers`,
+  args: [ '--verbose' ],
+  env: { TOKEN: token },
+  min: 1,
+  max: 4,
+  idleTimeout: 30000,
+  stopTimeout: 1000,
+  stopSignal: 'SIGINT'
+  strategy: 'fill',
+  full: 100
+});
+```
+### workerPool.cwd : string
+The current working directory for worker processes. Takes effect after start/recycle.
+
+**Example**  
+```js
+workerPool.cwd = `${versionPath}/workers`;
+
+await workerPool.recycle();
+```
+### workerPool.args : Array.<string>
+Arguments to pass to worker processes. Takes effect after start/recycle.
+
+**Example**  
+```js
+workerPool.args = [ '--verbose' ];
+
+await workerPool.recycle();
+```
+### workerPool.env : Object
+Environmental variables to set for worker processes. Takes effect after start/recycle.
+
+**Example**  
+```js
+workerPool.env = { TOKEN: newToken };
+
+await workerPool.recycle();
+```
+### workerPool.isStopping : boolean
+True if the worker pool is stopping
+
+### workerPool.isStopped : boolean
+True if the worker pool has stopped
+
+### workerPool.isStarted : boolean
+True if the worker pool has started
+
+### workerPool.getProcessCount() ⇒ Number
+Gets the current number of worker processes
+
+**Returns**: Number - The current number of worker processes  
+### workerPool.start() ⇒ Promise
 Starts the worker pool
 
-### workerPool.stop()
+**Resolves**: When the worker pool has started  
+**Rejects**: WorkerPool.NotReadyError | Error When an error has been thrown  
+### workerPool.stop() ⇒ Promise
 Stops the worker pool, gracefully shutting down each worker process
 
-### workerPool.recycle()
+**Resolves**: When the worker pool has stopped  
+**Rejects**: Error When an error has been thrown  
+### workerPool.recycle() ⇒ Promise
 Recycle the worker pool, gracefully shutting down existing worker processes
 and starting up new worker processes
 
+**Resolves**: When the worker pool has recycled  
+**Rejects**: WorkerPool.NotReadyError | Error When an error has been thrown  
 ### workerPool.call(modulePath, functionName, ...args) ⇒ Promise
-Sends a request to a worker process in the pool asking it to require a module and call a function with the provided arguments
+Routes a request to a worker in the pool asking it to import a module and call a function with the provided arguments.
 
-**Returns**: Promise - The result of the function invocation  
+**Note**: WorkerPool#call() uses JSON serialization to communicate with worker processes, so only types/objects that can survive JSON.stringify()/JSON.parse() will be passed through unchanged.
+
+**Resolves**: any The return value of the function call when the call returns  
+**Rejects**: WorkerPool.UnexpectedExitError | WorkerPool.WorkerError | Error When an error has been thrown  
 
 | Param | Type | Description |
 | --- | --- | --- |
-| modulePath | string | The module path for the worker process to require() |
-| functionName | string | The name of a function expored by the required module |
-| ...args | any | Arguments to pass when invoking function |
+| modulePath | string | The module path for the worker process to import |
+| functionName | string | The name of a function expored by the imported module |
+| ...args | any | Arguments to pass when calling the function |
 
+**Example**  
+```js
+const result = await workerPool.call('user-module', 'hashPassword', password, salt);
+```
 ### workerPool.proxy(modulePath, functionName) ⇒ function
-Creates a proxy function that will call WorkerPool#call() with the provided module path and function name
+Creates a proxy function that will call WorkerPool#call() with the provided module path, function name, and arguments. Provided as a convenience and minor performance improvement as the modulePath will only be resolved when creating the proxy, rather than with each call.
 
-**Returns**: function - A function that returns a Promise and calls the worker process function with the provided args  
+**Note**: WorkerPool#proxy() uses JSON serialization to communicate with worker processes, so only types/objects that can survive JSON.stringify()/JSON.parse() will be passed through unchanged.
+
+**Returns**: function - A function that calls WorkerPool#call() with the provided modulePath, functionName, and args, and returns its Promise  
 
 | Param | Type | Description |
 | --- | --- | --- |
-| modulePath | string | The module path for the worker process to require() |
-| functionName | string | The name of a function expored by the required module |
+| modulePath | string | The module path for the worker process to import |
+| functionName | string | The name of a function expored by the imported module |
 
-## Worker
+**Example**  
+```js
+const hashPassword = workerPool.proxy('user-module', 'hashPassword');
 
-* [Worker](#markdown-header-worker)
-    * [.start()](#markdown-header-workerstart)
-    * [.stop()](#markdown-header-workerstop)
-    * [.request(message)](#markdown-header-workerrequestmessage-) ⇒ *
+const hashedPassword = await hashPassword(password, salt);
+```
+### "error"
+Emitted when an error is thrown in the constructor.
 
-### worker.start()
-### worker.stop()
-### worker.request(message) ⇒ *
-Send a request to the worker process and wait for and return the result
+### "start"
+Emitted when the worker pool starts.
 
-**Throws**:
+### "recycle"
+Emitted when the worker pool recycles.
 
-- Worker.NoChildProcessError 
+### "stop"
+Emitted when the worker pool stops.
 
+### WorkerPool.NotStartedError
+Thrown when the worker pool is not started
 
-| Param | Type |
-| --- | --- |
-| message | * | 
+### WorkerPool.NotReadyError
+Thrown when a worker process doesn't signal that it is ready
+
+### WorkerPool.UnexpectedExitError
+Thrown when a worker process exits unexpectedly
+
+### WorkerPool.WorkerError
+Thrown when a function called by a worker process (or a worker process itself) throws an error
 
 
 ---
