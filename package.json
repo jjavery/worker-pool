@@ -1,6 +1,6 @@
 {
   "name": "@jjavery/worker-pool",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A worker pool for Node.js applications",
   "keywords": [
     "worker pool",
@@ -21,7 +21,8 @@
     "test": "test"
   },
   "scripts": {
-    "test": "nyc mocha",
+    "test": "mocha",
+    "coverage": "nyc mocha",
     "docs": "jsdoc2md --template README.template.hbs.md --plugin @jjavery/dmd-jjavery --files src/*.js > README.md"
   },
   "devDependencies": {

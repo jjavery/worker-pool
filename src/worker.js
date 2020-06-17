@@ -33,6 +33,7 @@ class UnexpectedExitError extends Error {
  *
  */
 class Worker {
+  _id = getNextWorkerID();
   _args;
   _cwd;
   _env;
@@ -50,16 +51,16 @@ class Worker {
   _createTimestamp = null;
   _idleTimestamp = null;
 
+  get id() {
+    return this._id;
+  }
+
   get waiting() {
     return this._waiting;
   }
 
   get pid() {
     return this._childProcess?.pid ?? null;
-  }
-
-  get exitCode() {
-    return this._childProcess?.exitCode ?? null;
   }
 
   constructor({
@@ -427,6 +428,12 @@ class Worker {
   static NoChildProcessError = NoChildProcessError;
   static ChildProcessNotReadyError = ChildProcessNotReadyError;
   static UnexpectedExitError = UnexpectedExitError;
+}
+
+let workerID = 0;
+
+function getNextWorkerID() {
+  return workerID++;
 }
 
 let requestID = 0;
