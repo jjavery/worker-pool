@@ -83,6 +83,7 @@ processes to require modules and call their exported functions.
 
 * [WorkerPool](#markdown-header-workerpool-eventemitter) ⇐ EventEmitter
     * [new WorkerPool(options)](#markdown-header-new-workerpooloptions)
+    * [.start()](#markdown-header-workerpoolstart)
     * [.stop()](#markdown-header-workerpoolstop)
     * [.recycle()](#markdown-header-workerpoolrecycle)
     * [.call(modulePath, functionName, ...args)](#markdown-header-workerpoolcallmodulepath-functionname-args-promise) ⇒ Promise
@@ -103,6 +104,10 @@ processes to require modules and call their exported functions.
 | options.signal | 'SIGTERM' ⎮ 'SIGINT' ⎮ 'SIGHUP' ⎮ 'SIGKILL' | `'SIGTERM'` | Initial signal to send when destroying worker processes |
 | options.strategy | 'fewest' ⎮ 'fill' ⎮ 'round-robin' ⎮ 'random' | `'fewest'` | The strategy to use when routing requests to worker processes |
 | options.full | number | `10` | The number of requests per worker process used by the 'fill' strategy |
+| options.start | boolean | `true` | Whether to automatically start the worker pool |
+
+### workerPool.start()
+Starts the worker pool
 
 ### workerPool.stop()
 Stops the worker pool, gracefully shutting down each worker process

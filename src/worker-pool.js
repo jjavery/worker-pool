@@ -13,9 +13,9 @@ const DEFAULT_SIGNAL = 'SIGTERM';
 const DEFAULT_STRATEGY = 'fewest';
 const DEFAULT_FULL = 10;
 
-class NoWorkersError extends Error {
+class NotStartedError extends Error {
   constructor() {
-    super('There are no workers available in this work pool');
+    super('This worker pool has not been started');
   }
 }
 
@@ -63,6 +63,25 @@ class WorkerPool extends EventEmitter {
     this._env = value;
   }
 
+  get isStopping() {
+    return this._stopping.length > 0;
+  }
+
+  get isStopped() {
+    return this._stopping.length === 0 && this._workers.length === 0;
+  }
+
+  get isStarted() {
+    return this._workers.length > 0;
+  }
+
+  getProcessCount() {
+    return this._workers.reduce(
+      (count, worker) => (worker.pid != null ? ++count : count),
+      0
+    );
+  }
+
   /**
    * @param {Object} options={} - Optional parameters
    * @param {number} options.cwd - The current working directory for worker processes
@@ -75,6 +94,7 @@ class WorkerPool extends EventEmitter {
    * @param {'SIGTERM'|'SIGINT'|'SIGHUP'|'SIGKILL'} options.signal='SIGTERM' - Initial signal to send when destroying worker processes
    * @param {'fewest'|'fill'|'round-robin'|'random'} options.strategy='fewest' - The strategy to use when routing requests to worker processes
    * @param {number} options.full=10 - The number of requests per worker process used by the 'fill' strategy
+   * @param {boolean} options.start=true - Whether to automatically start the worker pool
    */
   constructor({
     cwd,
@@ -86,7 +106,8 @@ class WorkerPool extends EventEmitter {
     timeout = DEFAULT_TIMEOUT,
     signal = DEFAULT_SIGNAL,
     strategy = DEFAULT_STRATEGY,
-    full = DEFAULT_FULL
+    full = DEFAULT_FULL,
+    start = true
   } = {}) {
     super();
 
@@ -105,16 +126,72 @@ class WorkerPool extends EventEmitter {
     this._strategy = strategy;
     this._full = full;
 
+    if (start) {
+      this.start().catch((err) => {
+        this.emit('error', err);
+      });
+    }
+  }
+
+  /**
+   * Starts the worker pool
+   */
+  async start() {
+    if (this.isStarted) {
+      return;
+    }
+
+    debug('Starting worker pool');
+
     this._createWorkers();
 
-    debug('Worker pool started');
+    return this._startMinWorkers().then(() => {
+      debug('Worker pool started');
 
-    this.emit('start');
+      this.emit('start');
+    });
+  }
+
+  /**
+   * Stops the worker pool, gracefully shutting down each worker process
+   */
+  async stop() {
+    debug('Stopping worker pool');
+
+    const workers = this._workers;
+    this._workers = [];
+
+    return this._stop(workers).then(() => {
+      debug('Worker pool stopped');
+
+      this.emit('stop');
+    });
+  }
+
+  /**
+   * Recycle the worker pool, gracefully shutting down existing worker processes
+   * and starting up new worker processes
+   */
+  async recycle() {
+    debug('Recycling worker pool');
+
+    const oldWorkers = this._workers;
+
+    // Create a new set of workers
+    this._createWorkers();
+
+    // Stop the old workers and start the minimum number of new workers
+    return Promise.all([this._stop(oldWorkers), this._startMinWorkers()]).then(
+      () => {
+        debug('Worker pool recycled');
+
+        this.emit('recycle');
+      }
+    );
   }
 
   _createWorkers() {
     const workers = (this._workers = []);
-    const min = this._min;
 
     for (let i = 0, max = this._max; i < max; ++i) {
       const worker = new Worker({
@@ -126,81 +203,17 @@ class WorkerPool extends EventEmitter {
         signal: this._signal
       });
 
-      if (i < min) {
-        worker
-          .start()
-          .then(() => {})
-          .catch(() => {});
-      }
-
       workers.push(worker);
     }
   }
 
-  info() {
-    const result = {
-      workers: [],
-      processes: []
-    };
-
-    addToResult(this._stopping);
-    addToResult(this._workers);
-
-    function addToResult(workers) {
-      for ({ waiting, _childProcess } of workers) {
-        result.workers.push({
-          waiting,
-          pid: _childProcess?.pid ?? null,
-          exitCode: _childProcess?.exitCode ?? null
-        });
-      }
-    }
-
-    return result;
-  }
-
-  /**
-   * Stops the worker pool, gracefully shutting down each worker process
-   */
-  stop() {
-    debug('Stopping worker pool');
-
+  async _startMinWorkers() {
     const workers = this._workers;
-    this._workers = [];
+    const min = this._min;
 
-    this._stop(workers)
-      .then(() => {
-        debug('Worker pool stopped');
+    const startWorkers = workers.slice(0, min).map((worker) => worker.start());
 
-        this.emit('stop');
-      })
-      .catch((err) => {
-        console.log(err);
-      });
-  }
-
-  /**
-   * Recycle the worker pool, gracefully shutting down existing worker processes
-   * and starting up new worker processes
-   */
-  recycle() {
-    debug('Recycling worker pool');
-
-    const workers = this._workers;
-
-    // Create a new set of workers
-    this._createWorkers();
-
-    // Stop the old workers
-    this._stop(workers)
-      .then(() => {
-        debug('Worker pool recycled');
-
-        this.emit('recycle');
-      })
-      .catch((err) => {
-        console.log(err);
-      });
+    return Promise.all(startWorkers);
   }
 
   async _stop(workers) {
@@ -271,8 +284,8 @@ class WorkerPool extends EventEmitter {
   }
 
   _getWorker() {
-    if (this._workers.length === 0) {
-      throw new NoWorkersError();
+    if (!this.isStarted) {
+      throw new NotStartedError();
     }
 
     switch (this._strategy) {
@@ -377,15 +390,12 @@ class WorkerPool extends EventEmitter {
       return true;
     }
 
-    const count = this._workers.reduce(
-      (count, worker) => (worker.pid != null ? count++ : count),
-      0
-    );
+    const count = this.getProcessCount();
 
     return count > min;
   }
 
-  static NoWorkersError = NoWorkersError;
+  static NotRunningError = NotStartedError;
 }
 
 module.exports = WorkerPool;
