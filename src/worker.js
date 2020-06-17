@@ -4,22 +4,25 @@ const { deserializeError } = require('serialize-error');
 
 debug.color = 3;
 
-const DEFAULT_IDLE = 10000;
-const DEFAULT_TIMEOUT = 10000;
-const DEFAULT_SIGNAL = 'SIGTERM';
+const DEFAULT_IDLE_TIMEOUT = 10000;
+const DEFAULT_STOP_TIMEOUT = 10000;
+const DEFAULT_STOP_SIGNAL = 'SIGTERM';
 const WORKER_MAIN = `${__dirname}/worker-main.js`;
-const WAIT_FOR_CHILD_PROCESS_READY_MESSAGE_MS = 1000;
-const HOUSEKEEPING_MS = 1000;
+const CHILD_PROCESS_READY_TIMEOUT = 1000;
+const HOUSEKEEPING_TIMEOUT = 1000;
 
-class NoChildProcessError extends Error {
-  constructor() {
-    super('No child process');
+class NotReadyError extends Error {
+  constructor({ pid }) {
+    super(`Timed out waiting for worker process [${pid}] to send ready message`);
   }
 }
 
-class ChildProcessNotReadyError extends Error {
-  constructor({ pid }) {
-    super(`Timed out waiting for child process [${pid}] to send ready message`);
+class WorkerError extends Error {
+  constructor(err) {
+    const deserialized = deserializeError(err);
+    super(deserialized.message);
+    this.name = deserialized.name;
+    this.stack = deserialized.stack;
   }
 }
 
@@ -30,17 +33,19 @@ class UnexpectedExitError extends Error {
 }
 
 /**
- *
+ * Responsible for starting and stopping worker processes and handling requests
+ * and replies
+ * @private
  */
 class Worker {
   _id = getNextWorkerID();
   _args;
   _cwd;
   _env;
-  _idle;
-  _timeout;
+  _idleTimeout;
+  _stopTimeout;
+  _stopSignal;
   _stopWhenIdle;
-  _signal;
   _waiting = 0;
   _childProcess = null;
   _creatingChildProcess = null;
@@ -63,32 +68,46 @@ class Worker {
     return this._childProcess?.pid ?? null;
   }
 
+  /**
+   * @param {object} options={} - Optional parameters
+   * @param {string} options.cwd - The current working directory for worker processes
+   * @param {string[]} options.args - Arguments to pass to worker processes
+   * @param {Object} options.env - Environmental variables to set for worker processes
+   * @param {number} options.idleTimeout=10000 - Milliseconds before an idle worker process will be asked to stop via options.stopSignal
+   * @param {number} options.stopTimeout=10000 - Milliseconds before an idle worker process will receive SIGKILL after it has been asked to stop
+   * @param {'SIGTERM'|'SIGINT'|'SIGHUP'|'SIGKILL'} options.stopSignal='SIGTERM' - Initial signal to send when stopping worker processes
+   * @param {Function} options.stopWhenIdle - The worker will call this function to determine whether to stop an idle worker process
+   * @private
+   */
   constructor({
     args,
     cwd,
     env,
-    idle = DEFAULT_IDLE,
-    timeout = DEFAULT_TIMEOUT,
-    stopWhenIdle = null,
-    signal = DEFAULT_SIGNAL
+    idleTimeout = DEFAULT_IDLE_TIMEOUT,
+    stopTimeout = DEFAULT_STOP_TIMEOUT,
+    stopSignal = DEFAULT_STOP_SIGNAL,
+    stopWhenIdle = null
   } = {}) {
     this._args = args;
     this._cwd = cwd;
     this._env = env;
-    this._idle = idle;
-    this._timeout = timeout;
+    this._idleTimeout = idleTimeout;
+    this._stopTimeout = stopTimeout;
+    this._stopSignal = stopSignal;
     this._stopWhenIdle = stopWhenIdle;
-    this._signal = signal;
 
     const timer = setInterval(() => {
       this._housekeeping();
-    }, HOUSEKEEPING_MS);
+    }, HOUSEKEEPING_TIMEOUT);
 
     timer.unref();
   }
 
   /**
-   *
+   * Start the worker process
+   * @returns {Promise}
+   * @throws {Worker.NotReadyError}
+   * @protected
    */
   async start() {
     const destroyingChildProcess = this._destroyingChildProcess;
@@ -130,7 +149,9 @@ class Worker {
   }
 
   /**
-   *
+   * Stop the worker process
+   * @returns {Promise}
+   * @protected
    */
   async stop() {
     const creatingChildProcess = this._creatingChildProcess;
@@ -172,9 +193,11 @@ class Worker {
 
   /**
    * Send a request to the worker process and wait for and return the result
-   * @param {*} message
-   * @returns {*}
-   * @throws {Worker.NoChildProcessError}
+   * @param {any} message
+   * @returns {Promise}
+   * @resolves {any} - The result of the function invocation
+   * @rejects {Worker.UnexpectedExitError|Error}
+   * @protected
    */
   async request(message = {}) {
     await this.start();
@@ -220,7 +243,7 @@ class Worker {
     debug('%j', message);
 
     if (err != null) {
-      reject(deserializeError(err));
+      reject(new WorkerError(err));
     } else {
       resolve(result);
     }
@@ -228,14 +251,15 @@ class Worker {
 
   _housekeeping() {
     const idleTimestamp = this._idleTimestamp;
-    const idle = this._idle;
+    const idleTimeout = this._idleTimeout;
     const stopWhenIdle = this._stopWhenIdle;
 
     if (
       idleTimestamp != null &&
-      new Date().getTime() > idleTimestamp + idle &&
+      new Date().getTime() > idleTimestamp + idleTimeout &&
       (stopWhenIdle == null || stopWhenIdle())
     ) {
+      // TODO: Handle these errors
       this.stop()
         .then(() => {})
         .catch((err) => {});
@@ -289,8 +313,8 @@ class Worker {
       const timer = setTimeout(() => {
         removeStartupListeners();
 
-        reject(new ChildProcessNotReadyError(childProcess));
-      }, WAIT_FOR_CHILD_PROCESS_READY_MESSAGE_MS);
+        reject(new NotReadyError(childProcess));
+      }, CHILD_PROCESS_READY_TIMEOUT);
 
       timer.unref();
 
@@ -339,7 +363,7 @@ class Worker {
 
       childProcess.once('error', handleError);
 
-      const signal = this._signal;
+      const signal = this._stopSignal;
       let timer;
 
       // Don't bother with the timeout if the first signal is SIGKILL
@@ -352,7 +376,7 @@ class Worker {
             signal
           );
           childProcess.kill('SIGKILL');
-        }, this._timeout);
+        }, this._stopTimeout);
 
         // Don't let this timer keep the (parent) process alive
         timer.unref();
@@ -419,16 +443,28 @@ class Worker {
     const stopWhenIdle = this._stopWhenIdle;
 
     if (stopWhenIdle != null && !stopWhenIdle()) {
+      // TODO: Handle these errors
       this.start()
         .then(() => {})
         .catch((err) => {});
     }
   }
-
-  static NoChildProcessError = NoChildProcessError;
-  static ChildProcessNotReadyError = ChildProcessNotReadyError;
-  static UnexpectedExitError = UnexpectedExitError;
 }
+
+/**
+ * @static
+ */
+Worker.NotReadyError = NotReadyError;
+
+/**
+ * @static
+ */
+Worker.WorkerError = WorkerError;
+
+/**
+ * @static
+ */
+Worker.UnexpectedExitError = UnexpectedExitError;
 
 let workerID = 0;
 
