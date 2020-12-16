@@ -1,6 +1,6 @@
 {
   "name": "@jjavery/worker-pool",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "A worker pool for Node.js applications",
   "keywords": [
     "worker pool",
