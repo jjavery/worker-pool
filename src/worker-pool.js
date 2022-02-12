@@ -23,7 +23,7 @@ class NotStartedError extends Error {
  * Provides a load-balancing and (optionally) auto-scaling pool of worker
  * processes and the ability to request for worker processes to import modules,
  * call their exported functions, and reply with their return values and thrown
- * exceptions. Load balancing and auto-scaling is configurable via min/max
+ * exceptions. Load balancing and auto-scaling are configurable via min/max
  * limits, strategies, and timeouts.
  * @extends EventEmitter
  */
