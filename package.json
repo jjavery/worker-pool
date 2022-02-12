@@ -1,6 +1,6 @@
 {
   "name": "@jjavery/worker-pool",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "A worker pool for Node.js applications",
   "keywords": [
     "worker pool",
@@ -28,23 +28,23 @@
     "prepublish": "npm run build"
   },
   "devDependencies": {
-    "@babel/cli": "^7.12.10",
-    "@babel/core": "^7.12.10",
-    "@babel/preset-env": "^7.12.11",
-    "@babel/register": "^7.12.10",
+    "@babel/cli": "^7.17.0",
+    "@babel/core": "^7.17.2",
+    "@babel/eslint-parser": "^7.17.0",
+    "@babel/preset-env": "^7.16.11",
+    "@babel/register": "^7.17.0",
     "@jjavery/dmd-jjavery": "^0.1.0",
-    "babel-eslint": "^10.1.0",
-    "chai": "^4.2.0",
+    "chai": "^4.3.6",
     "eslint": "^7.15.0",
     "eslint-plugin-mocha": "^8.0.0",
     "eslint-plugin-promise": "^4.2.1",
-    "jsdoc-to-markdown": "^6.0.1",
-    "mocha": "^8.2.1",
+    "jsdoc-to-markdown": "^7.1.1",
+    "mocha": "^9.2.0",
     "nyc": "^15.1.0"
   },
   "dependencies": {
-    "debug": "^4.3.1",
-    "serialize-error": "^7.0.1"
+    "debug": "^4.3.3",
+    "serialize-error": "^8.1.0"
   },
   "engines": {
     "node": ">=10.0.0"
