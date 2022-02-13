@@ -1,5 +1,5 @@
-const { assert } = require('chai');
-const Worker = require('../src/worker');
+import { assert } from 'chai';
+import Worker from './worker';
 
 describe('Worker', function () {
   it('creates a worker', async function () {

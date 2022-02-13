@@ -1,6 +1,6 @@
-const { assert } = require('chai');
-const WorkerPool = require('../src/worker-pool');
-const Worker = require('../src/worker');
+import { assert } from 'chai';
+import WorkerPool, { NotStartedError } from './worker-pool';
+import { UnexpectedExitError, WorkerError } from './worker';
 
 describe('WorkerPool', function () {
   it('creates a worker pool', async function () {
@@ -114,7 +114,7 @@ describe('WorkerPool', function () {
 
       assert.fail('Failed to throw');
     } catch (err) {
-      assert.instanceOf(err, Worker.UnexpectedExitError);
+      assert.instanceOf(err, UnexpectedExitError);
     }
 
     const testFunc = workerPool.proxy('./test-worker', 'test');
@@ -158,7 +158,7 @@ describe('WorkerPool', function () {
 
       assert.fail('Failed to throw');
     } catch (err) {
-      assert.instanceOf(err, WorkerPool.NotStartedError);
+      assert.instanceOf(err, NotStartedError);
     }
   });
 
@@ -172,7 +172,7 @@ describe('WorkerPool', function () {
 
       assert.fail('Failed to throw');
     } catch (err) {
-      assert.instanceOf(err, Worker.WorkerError);
+      assert.instanceOf(err, WorkerError);
     } finally {
       await workerPool.stop();
     }

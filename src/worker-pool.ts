@@ -1,8 +1,10 @@
-const EventEmitter = require('events');
-const path = require('path');
-const os = require('os');
-const debug = require('debug')('worker-pool');
-const Worker = require('./worker');
+import EventEmitter from 'events';
+import path from 'path';
+import os from 'os';
+import { debug as debugfn } from 'debug';
+import Worker from './worker';
+
+const debug = debugfn('worker-pool');
 
 const debug_call = debug.extend('call');
 
@@ -13,10 +15,29 @@ const DEFAULT_STOP_SIGNAL = 'SIGTERM';
 const DEFAULT_STRATEGY = 'fewest';
 const DEFAULT_FULL = 10;
 
-class NotStartedError extends Error {
+/**
+ * Thrown when the worker pool is not started
+ */
+export class NotStartedError extends Error {
   constructor() {
     super('This worker pool has not been started');
   }
+}
+
+export { NotReadyError, WorkerError, UnexpectedExitError } from './worker';
+
+interface WorkerPoolOptions {
+  cwd?: string;
+  args?: string[];
+  env?: any;
+  min?: number;
+  max?: number;
+  idleTimeout?: number;
+  stopTimeout?: number;
+  stopSignal?: 'SIGTERM' | 'SIGINT' | 'SIGHUP' | 'SIGKILL';
+  strategy?: 'fewest' | 'fill' | 'round-robin' | 'random';
+  full?: number;
+  start?: boolean;
 }
 
 /**
@@ -27,7 +48,7 @@ class NotStartedError extends Error {
  * limits, strategies, and timeouts.
  * @extends EventEmitter
  */
-class WorkerPool extends EventEmitter {
+export default class WorkerPool extends EventEmitter {
   /**
    * Emitted when an error is thrown in the constructor.
    * @event WorkerPool#error
@@ -49,22 +70,21 @@ class WorkerPool extends EventEmitter {
    * @event WorkerPool#stop
    */
 
-  _cwd;
-  _args;
-  _env;
-  _min;
-  _max;
-  _idleTimeout;
-  _stopTimeout;
-  _stopSignal;
-  _strategy;
-  _full;
-  _serialization = 'json';
+  private _cwd?: string;
+  private _args?: string[];
+  private _env?: any;
+  private _min: number;
+  private _max: number;
+  private _idleTimeout: number;
+  private _stopTimeout: number;
+  private _stopSignal: 'SIGTERM' | 'SIGINT' | 'SIGHUP' | 'SIGKILL';
+  private _strategy: 'fewest' | 'fill' | 'round-robin' | 'random';
+  private _full: number;
 
-  _workers = [];
-  _stopping = [];
+  private _workers: Worker[] = [];
+  private _stopping: Worker[] = [];
 
-  _round = 0;
+  private _round = 0;
 
   /**
    * The current working directory for worker processes. Takes effect after start/recycle.
@@ -196,7 +216,7 @@ class WorkerPool extends EventEmitter {
     strategy = DEFAULT_STRATEGY,
     full = DEFAULT_FULL,
     start = true
-  } = {}) {
+  }: WorkerPoolOptions = {}) {
     super();
 
     if (min > max) {
@@ -288,7 +308,9 @@ class WorkerPool extends EventEmitter {
   }
 
   _createWorkers() {
-    const workers = (this._workers = []);
+    this._workers = [];
+
+    const workers = this._workers;
 
     for (let i = 0, max = this._max; i < max; ++i) {
       const worker = new Worker({
@@ -297,7 +319,7 @@ class WorkerPool extends EventEmitter {
         env: this._env,
         idleTimeout: this._idleTimeout,
         stopTimeout: this._stopTimeout,
-        signal: this._stopSignal,
+        stopSignal: this._stopSignal,
         stopWhenIdle: () => this._stopWhenIdle()
       });
 
@@ -314,7 +336,7 @@ class WorkerPool extends EventEmitter {
     return Promise.all(startWorkers);
   }
 
-  async _stop(workers) {
+  async _stop(workers: Worker[]) {
     const stopping = this._stopping;
     stopping.push(...workers);
 
@@ -343,7 +365,7 @@ class WorkerPool extends EventEmitter {
    * @resolves {any} The return value of the function call when the call returns
    * @rejects {WorkerPool.UnexpectedExitError | WorkerPool.WorkerError | Error} When an error has been thrown
    */
-  async call(modulePath, functionName, ...args) {
+  async call(modulePath: string, functionName: string, ...args: any[]) {
     const resolvedModulePath = this._resolve(modulePath);
 
     return this._call(resolvedModulePath, functionName, args);
@@ -364,15 +386,15 @@ class WorkerPool extends EventEmitter {
    * @param {string} functionName - The name of a function expored by the imported module
    * @returns {Function} A function that calls WorkerPool#call() with the provided modulePath, functionName, and args, and returns its Promise
    */
-  proxy(modulePath, functionName) {
+  proxy(modulePath: string, functionName: string) {
     const resolvedModulePath = this._resolve(modulePath);
 
-    return async (...args) => {
+    return async (...args: any[]) => {
       return this._call(resolvedModulePath, functionName, args);
     };
   }
 
-  async _call(resolvedModulePath, functionName, args) {
+  async _call(resolvedModulePath: string, functionName: string, args: any[]) {
     debug_call(
       'Calling module "%s" function "%s" with args %j',
       resolvedModulePath,
@@ -391,10 +413,13 @@ class WorkerPool extends EventEmitter {
     return result;
   }
 
-  _resolve(modulePath) {
+  _resolve(modulePath: string) {
     if (/^(\/|.\/|..\/)/.test(modulePath)) {
-      const dirname = path.dirname(module.parent.filename);
-      modulePath = path.resolve(dirname, modulePath);
+      const filename = module?.parent?.filename;
+      if (filename != null) {
+        const dirname = path.dirname(filename);
+        modulePath = path.resolve(dirname, modulePath);
+      }
     }
     return modulePath;
   }
@@ -433,9 +458,7 @@ class WorkerPool extends EventEmitter {
 
       if (
         candidate.waiting < worker.waiting ||
-        (candidate.waiting === 0 &&
-          candidate.isStarted &&
-          !worker.isStarted)
+        (candidate.waiting === 0 && candidate.isStarted && !worker.isStarted)
       ) {
         worker = candidate;
       }
@@ -541,29 +564,3 @@ class WorkerPool extends EventEmitter {
    * @returns {EventEmitter}
    */
 }
-
-/**
- * Thrown when the worker pool is not started
- * @Static
- */
-WorkerPool.NotStartedError = NotStartedError;
-
-/**
- * Thrown when a worker process doesn't signal that it is ready
- * @Static
- */
-WorkerPool.NotReadyError = Worker.NotReadyError;
-
-/**
- * Thrown when a worker process exits unexpectedly
- * @Static
- */
-WorkerPool.UnexpectedExitError = Worker.UnexpectedExitError;
-
-/**
- * Thrown when a function called by a worker process (or a worker process itself) throws an error
- * @Static
- */
-WorkerPool.WorkerError = Worker.WorkerError;
-
-module.exports = WorkerPool;

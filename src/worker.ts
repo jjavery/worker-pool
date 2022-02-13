@@ -1,24 +1,32 @@
-const child_process = require('child_process');
-const debug = require('debug')('worker-pool:worker');
-const { deserializeError } = require('serialize-error');
+import { ChildProcess, fork, SerializationType } from 'child_process';
+import { debug as debugfn } from 'debug';
+import { deserializeError } from 'serialize-error';
 
-debug.color = 3;
+const debug = debugfn('worker-pool:worker');
+
+(debug as any).color = 3;
 
 const DEFAULT_IDLE_TIMEOUT = 10000;
 const DEFAULT_STOP_TIMEOUT = 10000;
 const DEFAULT_STOP_SIGNAL = 'SIGTERM';
-const WORKER_MAIN = `${__dirname}/worker-main.js`;
+const WORKER_MAIN = `${__dirname}/worker-main`;
 const CHILD_PROCESS_READY_TIMEOUT = 1000;
 const HOUSEKEEPING_TIMEOUT = 1000;
 
-class NotReadyError extends Error {
-  constructor({ pid }) {
-    super(`Timed out waiting for worker process [${pid}] to send ready message`);
+interface NotReadyErrorOptions {
+  pid?: number;
+}
+
+export class NotReadyError extends Error {
+  constructor(options: NotReadyErrorOptions) {
+    super(
+      `Timed out waiting for worker process [${options.pid}] to send ready message`
+    );
   }
 }
 
-class WorkerError extends Error {
-  constructor(err) {
+export class WorkerError extends Error {
+  constructor(err: Error) {
     const deserialized = deserializeError(err);
     super(deserialized.message);
     this.name = deserialized.name;
@@ -26,10 +34,31 @@ class WorkerError extends Error {
   }
 }
 
-class UnexpectedExitError extends Error {
+export class UnexpectedExitError extends Error {
   constructor() {
     super(`Child process exited unexpectedly`);
   }
+}
+
+interface Request {
+  resolve: (value: unknown) => void;
+  reject: (err: Error) => void;
+}
+
+interface Message {
+  id: number;
+  err?: Error;
+  result?: any;
+}
+
+interface WorkerOptions {
+  args?: string[];
+  cwd?: string;
+  env?: any;
+  idleTimeout?: number;
+  stopTimeout?: number;
+  stopSignal?: 'SIGTERM' | 'SIGINT' | 'SIGHUP' | 'SIGKILL';
+  stopWhenIdle?: () => boolean;
 }
 
 /**
@@ -37,24 +66,25 @@ class UnexpectedExitError extends Error {
  * and replies
  * @private
  */
-class Worker {
-  _id = getNextWorkerID();
-  _args;
-  _cwd;
-  _env;
-  _idleTimeout;
-  _stopTimeout;
-  _stopSignal;
-  _stopWhenIdle;
-  _waiting = 0;
-  _childProcess = null;
-  _creatingChildProcess = null;
-  _destroyingChildProcess = null;
-  _messageListener = null;
-  _exitListener = null;
-  _requests = new Map();
-  _createTimestamp = null;
-  _idleTimestamp = null;
+export default class Worker {
+  private _id = getNextWorkerID();
+  private _args?: string[];
+  private _cwd?: string;
+  private _env?: any;
+  private _idleTimeout: number;
+  private _stopTimeout: number;
+  private _stopSignal: 'SIGTERM' | 'SIGINT' | 'SIGHUP' | 'SIGKILL';
+  private _stopWhenIdle?: () => boolean;
+  private _waiting = 0;
+  private _childProcess?: ChildProcess;
+  private _creatingChildProcess?: Promise<void>;
+  private _destroyingChildProcess?: Promise<void>;
+  private _messageListener?: (message: Message) => void;
+  private _exitListener?: () => void;
+  private _requests = new Map<number, Request>();
+  private _createTimestamp?: number;
+  private _idleTimestamp?: number;
+  private _serialization: SerializationType = 'json';
 
   get id() {
     return this._id;
@@ -66,6 +96,10 @@ class Worker {
 
   get pid() {
     return this._childProcess?.pid ?? null;
+  }
+
+  get isStarted() {
+    return this.pid != null;
   }
 
   /**
@@ -86,8 +120,8 @@ class Worker {
     idleTimeout = DEFAULT_IDLE_TIMEOUT,
     stopTimeout = DEFAULT_STOP_TIMEOUT,
     stopSignal = DEFAULT_STOP_SIGNAL,
-    stopWhenIdle = null
-  } = {}) {
+    stopWhenIdle
+  }: WorkerOptions = {}) {
     this._args = args;
     this._cwd = cwd;
     this._env = env;
@@ -140,7 +174,7 @@ class Worker {
           this._childProcess = childProcess;
           this._idleTimestamp = new Date().getTime();
           this._createTimestamp = new Date().getTime();
-          this._creatingChildProcess = null;
+          this._creatingChildProcess = undefined;
 
           resolve();
         })
@@ -168,9 +202,9 @@ class Worker {
       return;
     }
 
-    this._childProcess = null;
-    this._idleTimestamp = null;
-    this._createTimestamp = null;
+    this._childProcess = undefined;
+    this._idleTimestamp = undefined;
+    this._createTimestamp = undefined;
 
     const destroyingChildProcess = this._destroyingChildProcess;
 
@@ -183,7 +217,7 @@ class Worker {
     return (this._destroyingChildProcess = new Promise((resolve, reject) => {
       this._destroyChildProcess(childProcess)
         .then(() => {
-          this._destroyingChildProcess = null;
+          this._destroyingChildProcess = undefined;
 
           resolve();
         })
@@ -203,16 +237,17 @@ class Worker {
     await this.start();
 
     const childProcess = this._childProcess;
+    if (childProcess == null) return;
 
     this._waiting++;
-    this._idleTimestamp = null;
+    this._idleTimestamp = undefined;
 
     const id = getNextRequestID();
     const messageToSend = Object.assign({}, message, { id });
     let result;
 
     try {
-      debug('Sending message to child process [%d]:', childProcess.pid);
+      debug('Sending message to child process [%d]:', childProcess?.pid);
       debug('%j', messageToSend);
 
       childProcess.send(messageToSend);
@@ -233,14 +268,17 @@ class Worker {
     return result;
   }
 
-  _handleResponse(message) {
+  private _handleResponse(message: Message) {
     const { id, err, result } = message;
 
-    const { resolve, reject } = this._requests.get(id);
-    this._requests.delete(id);
-
-    debug('Received message from child process [%d]:', this._childProcess.pid);
+    debug('Received message from child process [%d]:', this._childProcess?.pid);
     debug('%j', message);
+
+    const request = this._requests.get(id);
+    if (request == null) return;
+
+    const { resolve, reject } = request;
+    this._requests.delete(id);
 
     if (err != null) {
       reject(new WorkerError(err));
@@ -249,7 +287,7 @@ class Worker {
     }
   }
 
-  _housekeeping() {
+  private _housekeeping() {
     const idleTimestamp = this._idleTimestamp;
     const idleTimeout = this._idleTimeout;
     const stopWhenIdle = this._stopWhenIdle;
@@ -266,7 +304,7 @@ class Worker {
     }
   }
 
-  async _createChildProcess() {
+  private async _createChildProcess(): Promise<ChildProcess> {
     const modulePath = WORKER_MAIN;
     const args = this._args;
     const cwd = this._cwd;
@@ -278,9 +316,9 @@ class Worker {
       const options = { cwd, env, serialization: this._serialization };
 
       // Start a child process
-      const childProcess = child_process.fork(modulePath, args, options);
+      const childProcess = fork(modulePath, args, options);
 
-      const handleMessage = (message) => {
+      const handleMessage = (message: string) => {
         if (message === 'ready') {
           removeStartupListeners();
 
@@ -297,7 +335,7 @@ class Worker {
       // Wait for a 'ready' message
       childProcess.on('message', handleMessage);
 
-      const handleError = (err) => {
+      const handleError = (err: Error) => {
         removeStartupListeners();
 
         debug('Child process error [%d]', childProcess.pid);
@@ -326,7 +364,7 @@ class Worker {
     });
   }
 
-  async _destroyChildProcess(childProcess) {
+  private async _destroyChildProcess(childProcess: ChildProcess) {
     this._removeListeners(childProcess);
 
     if (childProcess.exitCode !== null) {
@@ -352,7 +390,7 @@ class Worker {
 
       childProcess.once('exit', handleExit);
 
-      const handleError = (err) => {
+      const handleError = (err: Error) => {
         removeShutdownListeners();
 
         debug('Child process error [%d]', childProcess.pid);
@@ -364,7 +402,7 @@ class Worker {
       childProcess.once('error', handleError);
 
       const signal = this._stopSignal;
-      let timer;
+      let timer: NodeJS.Timeout;
 
       // Don't bother with the timeout if the first signal is SIGKILL
       if (signal !== 'SIGKILL') {
@@ -396,8 +434,8 @@ class Worker {
     });
   }
 
-  _addListeners(childProcess) {
-    const messageListener = (this._messageListener = (message) =>
+  private _addListeners(childProcess: ChildProcess) {
+    const messageListener = (this._messageListener = (message: Message) =>
       this._handleResponse(message));
     const exitListener = (this._exitListener = () =>
       this._handleUnexpectedExit());
@@ -406,7 +444,9 @@ class Worker {
     childProcess.once('exit', exitListener);
   }
 
-  _removeListeners(childProcess) {
+  private _removeListeners(childProcess?: ChildProcess) {
+    if (childProcess == null) return;
+
     const messageListener = this._messageListener;
     const exitListener = this._exitListener;
 
@@ -417,21 +457,21 @@ class Worker {
       childProcess.removeListener('exit', exitListener);
     }
 
-    this._messageListener = null;
-    this._exitListener = null;
+    this._messageListener = undefined;
+    this._exitListener = undefined;
   }
 
-  _handleUnexpectedExit() {
+  private _handleUnexpectedExit() {
     const childProcess = this._childProcess;
 
-    this._childProcess = null;
+    this._childProcess = undefined;
 
     this._removeListeners(childProcess);
 
     const requests = this._requests;
 
     if (requests.size > 0) {
-      debug('Child process [%d] exited unexpectedly', childProcess.pid);
+      debug('Child process [%d] exited unexpectedly', childProcess?.pid);
 
       for (let [id, { reject }] of requests) {
         requests.delete(id);
@@ -451,21 +491,6 @@ class Worker {
   }
 }
 
-/**
- * @static
- */
-Worker.NotReadyError = NotReadyError;
-
-/**
- * @static
- */
-Worker.WorkerError = WorkerError;
-
-/**
- * @static
- */
-Worker.UnexpectedExitError = UnexpectedExitError;
-
 let workerID = 0;
 
 function getNextWorkerID() {
@@ -478,8 +503,6 @@ function getNextRequestID() {
   return requestID++;
 }
 
-async function wait(ms) {
+async function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
-module.exports = Worker;

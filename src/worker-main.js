@@ -1,8 +1,8 @@
 // This is the entrypoint for all workers
 const { serializeError } = require('serialize-error');
 
-// If file has been run directly
-if (require.main === module) {
+// If module has been executed directly
+if (require.main === module && process.send != null) {
   // Keepalive
   setInterval(() => {}, 2 ** 31 - 1);
 
@@ -71,6 +71,7 @@ function send(message) {
   if (handleSend != null) {
     handleSend(message);
   } else {
+    if (process.send == null) return;
     process.send(message);
   }
 }
@@ -81,7 +82,8 @@ function onSend(handler) {
   handleSend = handler;
 }
 
+// Entrypoint for testing
 module.exports = {
   handleRequest,
   onSend
-};
+}
